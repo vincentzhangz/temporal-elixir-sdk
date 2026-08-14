@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  beam:
+    name: Elixir 1.20.3 / OTP 29.0
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.20.3"
+          otp-version: "29.0"
+      - run: mix deps.get
+      - run: mix format --check-formatted
+      - run: mix compile --warnings-as-errors
+      - run: mix test
+      - run: mix credo --strict
+
+  dialyzer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.20.3"
+          otp-version: "29.0"
+      - run: mix deps.get
+      - run: mix dialyzer

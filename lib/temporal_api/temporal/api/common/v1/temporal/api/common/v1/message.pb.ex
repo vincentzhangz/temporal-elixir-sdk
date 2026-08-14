@@ -1,0 +1,575 @@
+defmodule Temporal.Api.Common.V1.DataBlob do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.DataBlob",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :encoding_type, 1,
+    type: Temporal.Api.Enums.V1.EncodingType,
+    json_name: "encodingType",
+    enum: true
+
+  field :data, 2, type: :bytes
+end
+
+defmodule Temporal.Api.Common.V1.Payloads do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.Payloads",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :payloads, 1, repeated: true, type: Temporal.Api.Common.V1.Payload
+end
+
+defmodule Temporal.Api.Common.V1.Payload.MetadataEntry do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.Payload.MetadataEntry",
+    map: true,
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :key, 1, type: :string
+  field :value, 2, type: :bytes
+end
+
+defmodule Temporal.Api.Common.V1.Payload.ExternalPayloadDetails do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.Payload.ExternalPayloadDetails",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :size_bytes, 1, type: :int64, json_name: "sizeBytes"
+end
+
+defmodule Temporal.Api.Common.V1.Payload do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.Payload",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :metadata, 1,
+    repeated: true,
+    type: Temporal.Api.Common.V1.Payload.MetadataEntry,
+    map: true
+
+  field :data, 2, type: :bytes
+
+  field :external_payloads, 3,
+    repeated: true,
+    type: Temporal.Api.Common.V1.Payload.ExternalPayloadDetails,
+    json_name: "externalPayloads"
+end
+
+defmodule Temporal.Api.Common.V1.SearchAttributes.IndexedFieldsEntry do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.SearchAttributes.IndexedFieldsEntry",
+    map: true,
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :key, 1, type: :string
+  field :value, 2, type: Temporal.Api.Common.V1.Payload
+end
+
+defmodule Temporal.Api.Common.V1.SearchAttributes do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.SearchAttributes",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :indexed_fields, 1,
+    repeated: true,
+    type: Temporal.Api.Common.V1.SearchAttributes.IndexedFieldsEntry,
+    json_name: "indexedFields",
+    map: true
+end
+
+defmodule Temporal.Api.Common.V1.Memo.FieldsEntry do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.Memo.FieldsEntry",
+    map: true,
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :key, 1, type: :string
+  field :value, 2, type: Temporal.Api.Common.V1.Payload
+end
+
+defmodule Temporal.Api.Common.V1.Memo do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.Memo",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :fields, 1, repeated: true, type: Temporal.Api.Common.V1.Memo.FieldsEntry, map: true
+end
+
+defmodule Temporal.Api.Common.V1.Header.FieldsEntry do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.Header.FieldsEntry",
+    map: true,
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :key, 1, type: :string
+  field :value, 2, type: Temporal.Api.Common.V1.Payload
+end
+
+defmodule Temporal.Api.Common.V1.Header do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.Header",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :fields, 1, repeated: true, type: Temporal.Api.Common.V1.Header.FieldsEntry, map: true
+end
+
+defmodule Temporal.Api.Common.V1.WorkflowExecution do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.WorkflowExecution",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :workflow_id, 1, type: :string, json_name: "workflowId"
+  field :run_id, 2, type: :string, json_name: "runId"
+end
+
+defmodule Temporal.Api.Common.V1.WorkflowType do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.WorkflowType",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :name, 1, type: :string
+end
+
+defmodule Temporal.Api.Common.V1.ActivityType do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.ActivityType",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :name, 1, type: :string
+end
+
+defmodule Temporal.Api.Common.V1.RetryPolicy do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.RetryPolicy",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :initial_interval, 1, type: Google.Protobuf.Duration, json_name: "initialInterval"
+  field :backoff_coefficient, 2, type: :double, json_name: "backoffCoefficient"
+  field :maximum_interval, 3, type: Google.Protobuf.Duration, json_name: "maximumInterval"
+  field :maximum_attempts, 4, type: :int32, json_name: "maximumAttempts"
+
+  field :non_retryable_error_types, 5,
+    repeated: true,
+    type: :string,
+    json_name: "nonRetryableErrorTypes"
+end
+
+defmodule Temporal.Api.Common.V1.MeteringMetadata do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.MeteringMetadata",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :nonfirst_local_activity_execution_attempts, 13,
+    type: :uint32,
+    json_name: "nonfirstLocalActivityExecutionAttempts"
+end
+
+defmodule Temporal.Api.Common.V1.WorkerVersionStamp do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.WorkerVersionStamp",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :build_id, 1, type: :string, json_name: "buildId"
+  field :use_versioning, 3, type: :bool, json_name: "useVersioning"
+end
+
+defmodule Temporal.Api.Common.V1.WorkerVersionCapabilities do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.WorkerVersionCapabilities",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :build_id, 1, type: :string, json_name: "buildId"
+  field :use_versioning, 2, type: :bool, json_name: "useVersioning"
+  field :deployment_series_name, 4, type: :string, json_name: "deploymentSeriesName"
+end
+
+defmodule Temporal.Api.Common.V1.ResetOptions do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.ResetOptions",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  oneof :target, 0
+
+  field :first_workflow_task, 1,
+    type: Google.Protobuf.Empty,
+    json_name: "firstWorkflowTask",
+    oneof: 0
+
+  field :last_workflow_task, 2,
+    type: Google.Protobuf.Empty,
+    json_name: "lastWorkflowTask",
+    oneof: 0
+
+  field :workflow_task_id, 3, type: :int64, json_name: "workflowTaskId", oneof: 0
+  field :build_id, 4, type: :string, json_name: "buildId", oneof: 0
+
+  field :reset_reapply_type, 10,
+    type: Temporal.Api.Enums.V1.ResetReapplyType,
+    json_name: "resetReapplyType",
+    enum: true,
+    deprecated: true
+
+  field :current_run_only, 11, type: :bool, json_name: "currentRunOnly"
+
+  field :reset_reapply_exclude_types, 12,
+    repeated: true,
+    type: Temporal.Api.Enums.V1.ResetReapplyExcludeType,
+    json_name: "resetReapplyExcludeTypes",
+    enum: true
+end
+
+defmodule Temporal.Api.Common.V1.Callback.Nexus.HeaderEntry do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.Callback.Nexus.HeaderEntry",
+    map: true,
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :key, 1, type: :string
+  field :value, 2, type: :string
+end
+
+defmodule Temporal.Api.Common.V1.Callback.Nexus do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.Callback.Nexus",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :url, 1, type: :string
+
+  field :header, 2,
+    repeated: true,
+    type: Temporal.Api.Common.V1.Callback.Nexus.HeaderEntry,
+    map: true
+end
+
+defmodule Temporal.Api.Common.V1.Callback.Internal do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.Callback.Internal",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :data, 1, type: :bytes
+end
+
+defmodule Temporal.Api.Common.V1.Callback do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.Callback",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  oneof :variant, 0
+
+  field :nexus, 2, type: Temporal.Api.Common.V1.Callback.Nexus, oneof: 0
+  field :internal, 3, type: Temporal.Api.Common.V1.Callback.Internal, oneof: 0
+  field :links, 100, repeated: true, type: Temporal.Api.Common.V1.Link
+end
+
+defmodule Temporal.Api.Common.V1.Link.WorkflowEvent.EventReference do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.Link.WorkflowEvent.EventReference",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :event_id, 1, type: :int64, json_name: "eventId"
+  field :event_type, 2, type: Temporal.Api.Enums.V1.EventType, json_name: "eventType", enum: true
+end
+
+defmodule Temporal.Api.Common.V1.Link.WorkflowEvent.RequestIdReference do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.Link.WorkflowEvent.RequestIdReference",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :request_id, 1, type: :string, json_name: "requestId"
+  field :event_type, 2, type: Temporal.Api.Enums.V1.EventType, json_name: "eventType", enum: true
+end
+
+defmodule Temporal.Api.Common.V1.Link.WorkflowEvent do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.Link.WorkflowEvent",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  oneof :reference, 0
+
+  field :namespace, 1, type: :string
+  field :workflow_id, 2, type: :string, json_name: "workflowId"
+  field :run_id, 3, type: :string, json_name: "runId"
+
+  field :event_ref, 100,
+    type: Temporal.Api.Common.V1.Link.WorkflowEvent.EventReference,
+    json_name: "eventRef",
+    oneof: 0
+
+  field :request_id_ref, 101,
+    type: Temporal.Api.Common.V1.Link.WorkflowEvent.RequestIdReference,
+    json_name: "requestIdRef",
+    oneof: 0
+end
+
+defmodule Temporal.Api.Common.V1.Link.BatchJob do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.Link.BatchJob",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :job_id, 1, type: :string, json_name: "jobId"
+end
+
+defmodule Temporal.Api.Common.V1.Link.Activity do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.Link.Activity",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :namespace, 1, type: :string
+  field :activity_id, 2, type: :string, json_name: "activityId"
+  field :run_id, 3, type: :string, json_name: "runId"
+end
+
+defmodule Temporal.Api.Common.V1.Link.NexusOperation do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.Link.NexusOperation",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :namespace, 1, type: :string
+  field :operation_id, 2, type: :string, json_name: "operationId"
+  field :run_id, 3, type: :string, json_name: "runId"
+end
+
+defmodule Temporal.Api.Common.V1.Link.Workflow do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.Link.Workflow",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :namespace, 1, type: :string
+  field :workflow_id, 2, type: :string, json_name: "workflowId"
+  field :run_id, 3, type: :string, json_name: "runId"
+  field :reason, 4, type: :string
+end
+
+defmodule Temporal.Api.Common.V1.Link do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.Link",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  oneof :variant, 0
+
+  field :workflow_event, 1,
+    type: Temporal.Api.Common.V1.Link.WorkflowEvent,
+    json_name: "workflowEvent",
+    oneof: 0
+
+  field :batch_job, 2, type: Temporal.Api.Common.V1.Link.BatchJob, json_name: "batchJob", oneof: 0
+  field :activity, 3, type: Temporal.Api.Common.V1.Link.Activity, oneof: 0
+
+  field :nexus_operation, 4,
+    type: Temporal.Api.Common.V1.Link.NexusOperation,
+    json_name: "nexusOperation",
+    oneof: 0
+
+  field :workflow, 5, type: Temporal.Api.Common.V1.Link.Workflow, oneof: 0
+end
+
+defmodule Temporal.Api.Common.V1.Principal do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.Principal",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :type, 1, type: :string
+  field :name, 2, type: :string
+end
+
+defmodule Temporal.Api.Common.V1.Priority do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.Priority",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :priority_key, 1, type: :int32, json_name: "priorityKey"
+  field :fairness_key, 2, type: :string, json_name: "fairnessKey"
+  field :fairness_weight, 3, type: :float, json_name: "fairnessWeight"
+end
+
+defmodule Temporal.Api.Common.V1.WorkerSelector do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.WorkerSelector",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  oneof :selector, 0
+
+  field :worker_instance_key, 1, type: :string, json_name: "workerInstanceKey", oneof: 0
+end
+
+defmodule Temporal.Api.Common.V1.OnConflictOptions do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.OnConflictOptions",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :attach_request_id, 1, type: :bool, json_name: "attachRequestId"
+  field :attach_completion_callbacks, 2, type: :bool, json_name: "attachCompletionCallbacks"
+  field :attach_links, 3, type: :bool, json_name: "attachLinks"
+end
+
+defmodule Temporal.Api.Common.V1.TimeSkippingConfig do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.TimeSkippingConfig",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :enabled, 1, type: :bool
+  field :fast_forward, 2, type: Google.Protobuf.Duration, json_name: "fastForward"
+  field :disable_propagation, 3, type: :bool, json_name: "disablePropagation"
+end
+
+defmodule Temporal.Api.Common.V1.TimeSkippingStatePropagation do
+  @moduledoc false
+
+  use Protobuf,
+    full_name: "temporal.api.common.v1.TimeSkippingStatePropagation",
+    proto_source: "temporal/api/common/v1/message.proto",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
+
+  field :initial_skipped_duration, 1,
+    type: Google.Protobuf.Duration,
+    json_name: "initialSkippedDuration"
+
+  field :fast_forward_target_time, 2,
+    type: Google.Protobuf.Timestamp,
+    json_name: "fastForwardTargetTime"
+end

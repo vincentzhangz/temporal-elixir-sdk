@@ -1,0 +1,10 @@
+Temporal Elixir SDK
+Copyright 2026 Temporal Elixir SDK contributors
+
+This is an independent, unofficial community project. It is not developed,
+maintained, supported, or endorsed by Temporal Technologies.
+
+This product includes protobuf definitions from temporalio/api, copyright
+Temporal Technologies Inc., licensed under the MIT License. The unmodified
+inputs are pinned under proto/upstream and their provenance is recorded in
+proto/PROVENANCE.md.
