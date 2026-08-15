@@ -78,6 +78,68 @@ defmodule Temporal.Failure do
     )
   end
 
+  @spec to_proto(Exception.t(), list()) :: Failure.t()
+  def to_proto(%Temporal.ApplicationError{} = exception, stacktrace) do
+    %Failure{
+      message: exception.message,
+      source: "ElixirSDK",
+      stack_trace: Exception.format(:error, exception, stacktrace),
+      cause: cause_to_proto(exception.cause),
+      failure_info:
+        {:application_failure_info,
+         %ApplicationFailureInfo{
+           type: exception.type || "Temporal.ApplicationError",
+           non_retryable: exception.non_retryable,
+           details: Temporal.Payload.encode(exception.details),
+           next_retry_delay: to_duration(exception.next_retry_delay)
+         }}
+    }
+  end
+
+  def to_proto(%Temporal.CanceledError{} = exception, stacktrace) do
+    %Failure{
+      message: exception.message,
+      source: "ElixirSDK",
+      stack_trace: Exception.format(:error, exception, stacktrace),
+      cause: cause_to_proto(exception.cause),
+      failure_info:
+        {:canceled_failure_info,
+         %CanceledFailureInfo{details: Temporal.Payload.encode(exception.details)}}
+    }
+  end
+
+  def to_proto(%Temporal.TimeoutError{} = exception, stacktrace) do
+    %Failure{
+      message: exception.message,
+      source: "ElixirSDK",
+      stack_trace: Exception.format(:error, exception, stacktrace),
+      cause: cause_to_proto(exception.cause),
+      failure_info:
+        {:timeout_failure_info, %TimeoutFailureInfo{timeout_type: exception.timeout_type}}
+    }
+  end
+
+  def to_proto(exception, stacktrace) do
+    %Failure{
+      message: Exception.message(exception),
+      source: "ElixirSDK",
+      stack_trace: Exception.format(:error, exception, stacktrace),
+      failure_info:
+        {:application_failure_info,
+         %ApplicationFailureInfo{type: inspect(exception.__struct__), non_retryable: false}}
+    }
+  end
+
+  defp cause_to_proto(nil), do: nil
+  defp cause_to_proto(exception), do: to_proto(exception, [])
+
+  defp to_duration(nil), do: nil
+
+  defp to_duration(seconds) when is_integer(seconds) and seconds > 0,
+    do: %Google.Protobuf.Duration{seconds: seconds}
+
+  defp to_duration(_seconds), do: nil
+
   defp decode_details(nil), do: nil
 
   defp decode_details(payloads) do

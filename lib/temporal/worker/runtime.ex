@@ -3,10 +3,12 @@ defmodule Temporal.Worker.Runtime do
 
   alias Temporal.Api.Workflowservice.V1.{
     PollWorkflowTaskQueueResponse,
+    RespondQueryTaskCompletedRequest,
     RespondWorkflowTaskFailedRequest
   }
 
   alias Temporal.Api.Failure.V1.Failure
+  alias Temporal.Api.Query.V1.WorkflowQueryResult
   alias Temporal.Workflow.HistoryCursor
   alias Temporal.Workflow.TaskKernel.{Completion, Reducer, State}
 
@@ -37,6 +39,23 @@ defmodule Temporal.Worker.Runtime do
     end
   end
 
+  @spec prepare_query_response(PollWorkflowTaskQueueResponse.t(), map(), String.t(), keyword()) ::
+          {:ok, RespondQueryTaskCompletedRequest.t()} | {:error, term()}
+  def prepare_query_response(task, workflows, identity, options \\ []) do
+    with {:ok, state} <- fresh_state(task, options),
+         {:ok, reduced} <- Reducer.reduce_query(state, task, workflows) do
+      results = State.query_results(reduced)
+
+      case Map.get(results, "0") do
+        %WorkflowQueryResult{} = result ->
+          {:ok, respond_query_task(task, identity, result, options)}
+
+        _other ->
+          {:error, :query_result_missing}
+      end
+    end
+  end
+
   def prepare(task, workflows, identity, previous),
     do: prepare(task, workflows, identity, previous, [])
 
@@ -49,7 +68,14 @@ defmodule Temporal.Worker.Runtime do
       ) do
     with {:ok, state} <- state_for(previous, task, options),
          {:ok, reduced} <- Reducer.reduce_task(state, task, workflows) do
-      {:ok, Completion.request(task.task_token, identity, State.commands(reduced)), reduced}
+      {:ok,
+       Completion.request(
+         task.task_token,
+         identity,
+         State.commands(reduced),
+         State.query_results(reduced),
+         Map.get(reduced, :update_messages, [])
+       ), reduced}
     end
   end
 
@@ -123,4 +149,14 @@ defmodule Temporal.Worker.Runtime do
 
   defp failure_message({_kind, %{message: message}}) when is_binary(message), do: message
   defp failure_message(reason), do: inspect(reason)
+
+  defp respond_query_task(task, _identity, result, options) do
+    %RespondQueryTaskCompletedRequest{
+      task_token: task.task_token,
+      completed_type: result.result_type,
+      query_result: result.answer,
+      error_message: result.error_message,
+      namespace: Keyword.get(options, :namespace, "")
+    }
+  end
 end

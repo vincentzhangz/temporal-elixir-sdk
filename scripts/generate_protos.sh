@@ -15,9 +15,14 @@ rm -rf "$output_dir"
 mkdir -p "$output_dir"
 
 cd "$source_dir"
-# google/api inputs are resolved but not generated because grpc's googleapis
-# dependency already supplies those modules.
+# google/api inputs are resolved but not generated: the SDK has no
+# grpc/grpc_core dependency, so only message modules are produced.
+#
+# Message-only generation: the SDK's transport routes by method path
+# (@rpc_types) and does not use generated GRPC.Service/GRPC.Stub modules,
+# so the `plugins=grpc` flag is omitted. This keeps the SDK free of the
+# grpc/grpc_core dependencies.
 protoc \
   -I . \
-  --elixir_out="plugins=grpc,gen_proto_source=true:$output_dir" \
+  --elixir_out="gen_proto_source=true:$output_dir" \
   $(rg --files temporal nexusannotations -g '*.proto' | LC_ALL=C sort)

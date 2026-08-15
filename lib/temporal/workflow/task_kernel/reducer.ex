@@ -6,11 +6,15 @@ defmodule Temporal.Workflow.TaskKernel.Reducer do
   alias Temporal.Workflow.CommandBatch
   alias Temporal.Workflow.HistoryCursor
 
+  alias Temporal.Workflow.Machines.{ChildWorkflow, ExternalSignal}
+  alias Temporal.Workflow.Update
+
   alias Temporal.Workflow.TaskKernel.{
     Activation,
     CommandBuffer,
     EventReducer,
     MachineRegistry,
+    Query,
     State
   }
 
@@ -37,11 +41,15 @@ defmodule Temporal.Workflow.TaskKernel.Reducer do
            owned
            |> Map.put(:machines, replayed_machines)
            |> State.record_commands(emitted_commands(replayed.command)),
-         {:ok, machines, activation} <- activate(recorded, replayed) do
+         {:ok, machines, activation} <- activate(recorded, replayed),
+         {:ok, update_messages} <- process_updates(task.messages),
+         query_results <- run_queries(task.queries) do
       {:ok,
        recorded
        |> Map.put(:activation, activation)
        |> Map.put(:machines, machines)
+       |> Map.put(:query_results, query_results)
+       |> Map.put(:update_messages, update_messages)
        |> Map.put(:cursor, %{replayed | task_token: task.task_token})
        |> Map.put(:next_event_id, replayed.next_event_id)
        |> Map.put(:last_event_id, replayed.last_event_id)}
@@ -75,20 +83,37 @@ defmodule Temporal.Workflow.TaskKernel.Reducer do
     end
   end
 
+  @spec reduce_query(State.t(), PollWorkflowTaskQueueResponse.t(), map()) ::
+          {:ok, State.t()} | {:error, term()}
+  def reduce_query(
+        %State{} = state,
+        %PollWorkflowTaskQueueResponse{} = task,
+        workflows
+      )
+      when is_map(workflows) do
+    with :ok <- validate_task(task),
+         :ok <- validate_identity(state, task),
+         {:ok, workflow} <- fetch_workflow(workflows, task.workflow_type),
+         cursor <- HistoryCursor.new(workflow_id: state.workflow_id, run_id: state.run_id),
+         {:ok, replayed, _replayed_machines} <-
+           EventReducer.reduce(task.history, workflow, cursor, state.machines, state.mode),
+         query_results <- run_queries(%{"0" => task.query}) do
+      {:ok,
+       %{
+         state
+         | cursor: replayed,
+           next_event_id: replayed.next_event_id,
+           last_event_id: replayed.last_event_id,
+           query_results: query_results
+       }}
+    end
+  end
+
   defp validate_task(%{task_token: ""}), do: {:error, :empty_task}
   defp validate_task(%{history: nil}), do: {:error, :missing_history}
 
   defp validate_task(%{next_page_token: token}) when token != "",
     do: {:error, {:invalid_history_pagination, :unassembled_history}}
-
-  defp validate_task(%{query: query}) when not is_nil(query),
-    do: {:error, {:unsupported_feature, :queries}}
-
-  defp validate_task(%{queries: queries}) when map_size(queries) > 0,
-    do: {:error, {:unsupported_feature, :queries}}
-
-  defp validate_task(%{messages: [_ | _]}),
-    do: {:error, {:unsupported_feature, :updates}}
 
   defp validate_task(%{history: %{events: []}}), do: {:error, :missing_history}
   defp validate_task(%{history: %{events: _events}}), do: :ok
@@ -186,22 +211,37 @@ defmodule Temporal.Workflow.TaskKernel.Reducer do
   end
 
   defp register_command_machine(machines, type, id, command, sequence) do
-    machine = %{
-      command_type: command.command_type,
-      command: command,
-      sequence: sequence,
-      state: :command_created
-    }
+    machine =
+      case command.command_type do
+        :COMMAND_TYPE_START_CHILD_WORKFLOW_EXECUTION ->
+          ChildWorkflow.new(id, command, sequence)
+
+        :COMMAND_TYPE_SIGNAL_EXTERNAL_WORKFLOW_EXECUTION ->
+          ExternalSignal.new(id, command, sequence)
+
+        _other ->
+          %{
+            command_type: command.command_type,
+            command: command,
+            sequence: sequence,
+            state: :command_created
+          }
+      end
 
     case MachineRegistry.fetch(machines, type, id) do
       {:ok, existing} ->
         key = {type, id}
-        {:ok, put_in(machines, [:machines, key], Map.merge(machine, existing))}
+        {:ok, put_in(machines, [:machines, key], merge_machine(machine, existing))}
 
       :error ->
         MachineRegistry.register(machines, type, id, machine)
     end
   end
+
+  defp merge_machine(%struct{} = machine, %struct{} = existing),
+    do: Map.merge(existing, machine)
+
+  defp merge_machine(machine, existing), do: Map.merge(machine, existing)
 
   defp machine_identity(
          %{attributes: {:schedule_activity_task_command_attributes, %{activity_id: id}}},
@@ -214,6 +254,24 @@ defmodule Temporal.Workflow.TaskKernel.Reducer do
          _sequence
        ),
        do: {:timer, id}
+
+  defp machine_identity(
+         %{command_type: :COMMAND_TYPE_SIGNAL_EXTERNAL_WORKFLOW_EXECUTION},
+         sequence
+       ),
+       do: {:external_signal, "command-#{sequence}"}
+
+  defp machine_identity(
+         %{command_type: :COMMAND_TYPE_START_CHILD_WORKFLOW_EXECUTION},
+         sequence
+       ),
+       do: {:child_workflow, "command-#{sequence}"}
+
+  defp machine_identity(
+         %{command_type: :COMMAND_TYPE_SCHEDULE_NEXUS_OPERATION},
+         sequence
+       ),
+       do: {:workflow, "nexus-#{sequence}"}
 
   defp machine_identity(
          %{command_type: :COMMAND_TYPE_CONTINUE_AS_NEW_WORKFLOW_EXECUTION},
@@ -237,4 +295,36 @@ defmodule Temporal.Workflow.TaskKernel.Reducer do
   defp emitted_commands(%CommandBatch{commands: commands}), do: commands
   defp emitted_commands(nil), do: []
   defp emitted_commands(command), do: [command]
+
+  defp run_queries(queries) when is_map(queries) and map_size(queries) > 0 do
+    context = Temporal.Workflow.query_context()
+
+    try do
+      Query.run(queries, context)
+    after
+      Temporal.Workflow.clear_query_context()
+    end
+  end
+
+  defp run_queries(_queries) do
+    Temporal.Workflow.clear_query_context()
+    %{}
+  end
+
+  defp process_updates([]), do: {:ok, []}
+
+  defp process_updates(messages) when is_list(messages) do
+    case Temporal.Workflow.query_context() do
+      %{update_dispatcher: dispatcher} when not is_nil(dispatcher) ->
+        case Update.process(messages, dispatcher) do
+          {:ok, _accepted, responses} -> {:ok, responses}
+          {:error, _reason} = error -> error
+        end
+
+      _context ->
+        {:ok, []}
+    end
+  end
+
+  defp process_updates(_messages), do: {:ok, []}
 end

@@ -159,8 +159,8 @@ defmodule Temporal.WorkflowReplayTest do
             [
               event(
                 4,
-                :EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ACCEPTED,
-                {:workflow_execution_update_accepted_event_attributes, nil}
+                :EVENT_TYPE_WORKFLOW_EXECUTION_TERMINATED,
+                {:workflow_execution_terminated_event_attributes, nil}
               )
             ]
       }
@@ -169,8 +169,8 @@ defmodule Temporal.WorkflowReplayTest do
             {:unsupported_history_event,
              %{
                event_id: 4,
-               event_type: :EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ACCEPTED,
-               feature: :updates
+               event_type: :EVENT_TYPE_WORKFLOW_EXECUTION_TERMINATED,
+               feature: :workflow_termination
              }}} =
              Replay.replay(unsupported, &greeting/1,
                workflow_id: @workflow_id,

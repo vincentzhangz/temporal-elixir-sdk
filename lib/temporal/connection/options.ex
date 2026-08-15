@@ -26,6 +26,8 @@ defmodule Temporal.Connection.Options do
     * `:max_message_size` - request/response size limit in bytes
       (default 128 MiB)
     * `:retry_policy` - optional `Temporal.RPC.RetryPolicy`
+    * `:payload_codecs` - optional list of `Temporal.Codec` modules applied to
+      payloads at the client/worker boundary (e.g. `[Temporal.Codec.Base64]`)
   """
 
   @enforce_keys [:target, :namespace, :identity]
@@ -40,7 +42,8 @@ defmodule Temporal.Connection.Options do
             connect_timeout: 15_000,
             keepalive: nil,
             max_message_size: 128 * 1024 * 1024,
-            retry_policy: nil
+            retry_policy: nil,
+            payload_codecs: []
 
   @type provider(value) :: value | (-> value)
   @type keepalive :: %{interval: pos_integer(), timeout: pos_integer()} | nil
@@ -63,7 +66,8 @@ defmodule Temporal.Connection.Options do
          :ok <- validate_positive(deadline, :default_deadline),
          :ok <- validate_positive(connect_timeout, :connect_timeout),
          :ok <- validate_mtls(options),
-         :ok <- validate_verify(options) do
+         :ok <- validate_verify(options),
+         :ok <- validate_codecs(Keyword.get(options, :payload_codecs, [])) do
       tls = Keyword.get(options, :tls, tls_default?(target))
 
       {:ok,
@@ -79,10 +83,14 @@ defmodule Temporal.Connection.Options do
          connect_timeout: connect_timeout,
          keepalive: keepalive,
          max_message_size: max_message_size,
-         retry_policy: Keyword.get(options, :retry_policy)
+         retry_policy: Keyword.get(options, :retry_policy),
+         payload_codecs: Keyword.get(options, :payload_codecs, [])
        }}
     end
   end
+
+  @spec payload_codecs(t()) :: [module()]
+  def payload_codecs(%__MODULE__{payload_codecs: codecs}), do: codecs
 
   @spec metadata(t()) :: map()
   def metadata(%__MODULE__{} = options) do
@@ -119,6 +127,16 @@ defmodule Temporal.Connection.Options do
       _ -> {:error, {:invalid_options, :verify}}
     end
   end
+
+  defp validate_codecs(codecs) when is_list(codecs) do
+    if Enum.all?(codecs, &is_atom/1) do
+      :ok
+    else
+      {:error, {:invalid_options, :payload_codecs}}
+    end
+  end
+
+  defp validate_codecs(_codecs), do: {:error, {:invalid_options, :payload_codecs}}
 
   defp normalize_keepalive(nil), do: nil
 

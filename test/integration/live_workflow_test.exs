@@ -43,6 +43,112 @@ defmodule Temporal.LiveWorkflowTest do
              )
   end
 
+  test "reports the SDK name and version in WorkflowTaskCompleted events" do
+    {connection, task_queue} = live_connection_and_queue("sdk-metadata")
+
+    live_worker(connection, task_queue,
+      workflows: %{"Greeting" => fn name -> "hello #{name}" end}
+    )
+
+    assert {:ok, handle} =
+             Temporal.Client.start_workflow(
+               connection,
+               "Greeting",
+               "Temporal",
+               id: live_id("sdk-metadata"),
+               task_queue: task_queue
+             )
+
+    assert {:ok, "hello Temporal"} = Temporal.Client.result(handle, timeout: 60_000)
+
+    alias Temporal.Api.Common.V1.WorkflowExecution
+
+    alias Temporal.Api.History.V1.{
+      HistoryEvent,
+      WorkflowTaskCompletedEventAttributes
+    }
+
+    alias Temporal.Api.Workflowservice.V1.{
+      GetWorkflowExecutionHistoryRequest,
+      GetWorkflowExecutionHistoryResponse
+    }
+
+    request = %GetWorkflowExecutionHistoryRequest{
+      namespace: handle.namespace,
+      execution: %WorkflowExecution{
+        workflow_id: handle.workflow_id,
+        run_id: handle.run_id
+      }
+    }
+
+    method = "/temporal.api.workflowservice.v1.WorkflowService/GetWorkflowExecutionHistory"
+
+    assert {:ok, bytes} =
+             Temporal.Connection.unary(
+               handle.connection,
+               method,
+               GetWorkflowExecutionHistoryRequest.encode(request),
+               timeout: 5_000
+             )
+
+    response = GetWorkflowExecutionHistoryResponse.decode(bytes)
+
+    metadata =
+      response.history.events
+      |> Enum.filter(&(&1.event_type == :EVENT_TYPE_WORKFLOW_TASK_COMPLETED))
+      |> Enum.map(fn %HistoryEvent{attributes: attributes} ->
+        case attributes do
+          {:workflow_task_completed_event_attributes, %WorkflowTaskCompletedEventAttributes{} = a} ->
+            a.sdk_metadata
+
+          _ ->
+            nil
+        end
+      end)
+      |> Enum.reject(&is_nil/1)
+
+    assert [%{sdk_name: name, sdk_version: version}] = metadata
+    assert name == Temporal.SDKMetadata.name()
+    assert version == Temporal.SDKMetadata.version()
+  end
+
+  test "answers live queries against a running workflow" do
+    {connection, task_queue} = live_connection_and_queue("query")
+
+    _worker =
+      live_worker(connection, task_queue, workflows: %{"Queryable" => &queryable_workflow/1})
+
+    assert {:ok, handle} =
+             Temporal.Client.start_workflow(
+               connection,
+               "Queryable",
+               nil,
+               id: live_id("query"),
+               task_queue: task_queue
+             )
+
+    assert {:ok, "queryable-ready"} =
+             Temporal.Client.query_workflow(handle, "get_status", nil)
+
+    assert {:ok, "arg-value"} = Temporal.Client.query_workflow(handle, "echo", "arg-value")
+
+    assert :ok = Temporal.Client.signal_workflow(handle, "finish", nil)
+
+    assert {:ok, "complete"} = Temporal.Client.result(handle, timeout: 60_000)
+  end
+
+  defp queryable_workflow(_args) do
+    Temporal.Workflow.set_query_handler("get_status", fn _args -> "queryable-ready" end)
+    Temporal.Workflow.set_query_handler("echo", fn args -> args end)
+
+    Temporal.Workflow.set_signal_handler("finish", fn _input, _context, _state ->
+      {:ok, :complete}
+    end)
+
+    Temporal.Workflow.await_signal_state(fn state -> state == :complete end)
+    :complete
+  end
+
   test "schedules an Activity and completes with its decoded result" do
     address = System.fetch_env!("TEMPORAL_ADDRESS")
 

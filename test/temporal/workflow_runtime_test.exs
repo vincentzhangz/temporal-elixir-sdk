@@ -102,8 +102,8 @@ defmodule Temporal.WorkflowRuntimeTest do
           },
           %HistoryEvent{
             event_id: 4,
-            event_type: :EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ACCEPTED,
-            attributes: {:workflow_execution_update_accepted_event_attributes, nil}
+            event_type: :EVENT_TYPE_WORKFLOW_EXECUTION_TERMINATED,
+            attributes: {:workflow_execution_terminated_event_attributes, nil}
           }
         ]
       }
@@ -113,8 +113,8 @@ defmodule Temporal.WorkflowRuntimeTest do
             {:unsupported_history_event,
              %{
                event_id: 4,
-               event_type: :EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ACCEPTED,
-               feature: :updates
+               event_type: :EVENT_TYPE_WORKFLOW_EXECUTION_TERMINATED,
+               feature: :workflow_termination
              }}} =
              Runtime.complete(task, %{"Greeting" => fn -> :ok end}, "worker")
   end

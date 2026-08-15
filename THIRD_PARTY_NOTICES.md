@@ -6,13 +6,10 @@ This is a license inventory, not legal advice.
 ## Runtime dependencies
 
 - `protobuf` 0.17.0 — MIT
-- `grpc` 1.0.3 — Apache-2.0
-- `grpc_core` 1.0.3 — Apache-2.0
-- `googleapis` 0.1.0 — Apache-2.0
 - `mint` 1.9.3 — Apache-2.0
 - `castore` 1.0.21 — Apache-2.0
-- `hpax` 1.0.4 — Apache-2.0
 - `jason` 1.4.5 — Apache-2.0
+- `hpax` 1.0.4 — Apache-2.0
 - `telemetry` 1.4.2 — Apache-2.0
 
 ## Development and test dependencies
@@ -33,7 +30,3 @@ This is a license inventory, not legal advice.
 
 - `temporalio/api` v1.63.3 protobuf definitions — MIT. The upstream license is
   retained at `proto/upstream/temporal-api-v1.63.3/LICENSE`.
-- `grpc` 1.0.3 source vendored at `third_party/grpc` — Apache-2.0. The upstream
-  license is retained at `third_party/grpc/LICENSE`. It carries a Temporal SDK
-  patch for HTTP/2 PING keepalive on the Mint adapter; no new code or
-  dependencies were added.

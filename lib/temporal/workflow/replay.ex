@@ -17,15 +17,39 @@ defmodule Temporal.Workflow.TaskKernel.EventReducer do
     ActivityTaskScheduledEventAttributes,
     ActivityTaskStartedEventAttributes,
     ActivityTaskTimedOutEventAttributes,
+    ChildWorkflowExecutionCanceledEventAttributes,
+    ChildWorkflowExecutionCompletedEventAttributes,
+    ChildWorkflowExecutionFailedEventAttributes,
+    ChildWorkflowExecutionStartedEventAttributes,
+    ChildWorkflowExecutionTimedOutEventAttributes,
+    ExternalWorkflowExecutionSignaledEventAttributes,
     History,
+    MarkerRecordedEventAttributes,
+    NexusOperationCanceledEventAttributes,
+    NexusOperationCompletedEventAttributes,
+    NexusOperationFailedEventAttributes,
+    NexusOperationScheduledEventAttributes,
+    NexusOperationStartedEventAttributes,
+    NexusOperationTimedOutEventAttributes,
+    RequestCancelExternalWorkflowExecutionInitiatedEventAttributes,
+    SignalExternalWorkflowExecutionFailedEventAttributes,
+    SignalExternalWorkflowExecutionInitiatedEventAttributes,
+    StartChildWorkflowExecutionInitiatedEventAttributes,
     TimerCanceledEventAttributes,
     TimerFiredEventAttributes,
     TimerStartedEventAttributes,
+    UpsertWorkflowSearchAttributesEventAttributes,
+    WorkflowExecutionCanceledEventAttributes,
     WorkflowExecutionCancelRequestedEventAttributes,
     WorkflowExecutionCompletedEventAttributes,
     WorkflowExecutionContinuedAsNewEventAttributes,
+    WorkflowExecutionFailedEventAttributes,
     WorkflowExecutionSignaledEventAttributes,
     WorkflowExecutionStartedEventAttributes,
+    WorkflowExecutionUpdateAcceptedEventAttributes,
+    WorkflowExecutionUpdateCompletedEventAttributes,
+    WorkflowExecutionUpdateRejectedEventAttributes,
+    WorkflowPropertiesModifiedEventAttributes,
     WorkflowTaskCompletedEventAttributes,
     WorkflowTaskFailedEventAttributes,
     WorkflowTaskScheduledEventAttributes,
@@ -35,7 +59,7 @@ defmodule Temporal.Workflow.TaskKernel.EventReducer do
 
   alias Temporal.Workflow.CommandBatch
   alias Temporal.Workflow.HistoryCursor
-  alias Temporal.Workflow.Machines.Timer
+  alias Temporal.Workflow.Machines.{ChildWorkflow, ExternalSignal, Timer}
   alias Temporal.Workflow.Signal.Dispatcher
   alias Temporal.Workflow.TaskKernel.MachineRegistry
 
@@ -47,6 +71,8 @@ defmodule Temporal.Workflow.TaskKernel.EventReducer do
     EVENT_TYPE_WORKFLOW_TASK_FAILED
     EVENT_TYPE_WORKFLOW_TASK_TIMED_OUT
     EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED
+    EVENT_TYPE_WORKFLOW_EXECUTION_FAILED
+    EVENT_TYPE_WORKFLOW_EXECUTION_CANCELED
     EVENT_TYPE_WORKFLOW_EXECUTION_CANCEL_REQUESTED
     EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW
     EVENT_TYPE_ACTIVITY_TASK_SCHEDULED
@@ -59,15 +85,36 @@ defmodule Temporal.Workflow.TaskKernel.EventReducer do
     EVENT_TYPE_TIMER_STARTED
     EVENT_TYPE_TIMER_FIRED
     EVENT_TYPE_TIMER_CANCELED
+    EVENT_TYPE_MARKER_RECORDED
     EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED
+    EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ACCEPTED
+    EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_COMPLETED
+    EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_REJECTED
+    EVENT_TYPE_SIGNAL_EXTERNAL_WORKFLOW_EXECUTION_INITIATED
+    EVENT_TYPE_SIGNAL_EXTERNAL_WORKFLOW_EXECUTION_FAILED
+    EVENT_TYPE_EXTERNAL_WORKFLOW_EXECUTION_SIGNALED
+    EVENT_TYPE_REQUEST_CANCEL_EXTERNAL_WORKFLOW_EXECUTION_INITIATED
+    EVENT_TYPE_REQUEST_CANCEL_EXTERNAL_WORKFLOW_EXECUTION_FAILED
+    EVENT_TYPE_EXTERNAL_WORKFLOW_EXECUTION_CANCEL_REQUESTED
+    EVENT_TYPE_START_CHILD_WORKFLOW_EXECUTION_INITIATED
+    EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_STARTED
+    EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_COMPLETED
+    EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_FAILED
+    EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_CANCELED
+    EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_TIMED_OUT
+    EVENT_TYPE_NEXUS_OPERATION_SCHEDULED
+    EVENT_TYPE_NEXUS_OPERATION_STARTED
+    EVENT_TYPE_NEXUS_OPERATION_COMPLETED
+    EVENT_TYPE_NEXUS_OPERATION_FAILED
+    EVENT_TYPE_NEXUS_OPERATION_CANCELED
+    EVENT_TYPE_NEXUS_OPERATION_TIMED_OUT
+    EVENT_TYPE_UPSERT_WORKFLOW_SEARCH_ATTRIBUTES
+    EVENT_TYPE_WORKFLOW_PROPERTIES_MODIFIED
   )a
 
   @unsupported_patterns [
     {"ACTIVITY_TASK", :activities},
     {"QUERY", :queries},
-    {"UPDATE", :updates},
-    {"CHILD_WORKFLOW", :children},
-    {"EXTERNAL_WORKFLOW", :external_workflows},
     {"CONTINUED_AS_NEW", :continue_as_new}
   ]
 
@@ -419,6 +466,7 @@ defmodule Temporal.Workflow.TaskKernel.EventReducer do
              timer_outcomes: outcomes,
              timer_states: timer_states,
              signal_events: cursor.signal_events,
+             marker_results: cursor.marker_results,
              logical_time: event.event_time
            }) do
       {:ok,
@@ -478,6 +526,7 @@ defmodule Temporal.Workflow.TaskKernel.EventReducer do
              timer_outcomes: outcomes,
              timer_states: timer_states,
              signal_events: cursor.signal_events,
+             marker_results: cursor.marker_results,
              logical_time: event.event_time
            }) do
       {:ok,
@@ -488,6 +537,34 @@ defmodule Temporal.Workflow.TaskKernel.EventReducer do
            timer_states: timer_states,
            logical_time: event.event_time
        }, :command_event}
+    end
+  end
+
+  defp transition(
+         %{
+           event_type: :EVENT_TYPE_MARKER_RECORDED,
+           attributes:
+             {:marker_recorded_event_attributes, %MarkerRecordedEventAttributes{} = attributes}
+         } = event,
+         cursor,
+         :command_event,
+         _workflow
+       ) do
+    with :ok <-
+           correlate(
+             event.event_id,
+             :workflow_task_completed_event_id,
+             cursor.workflow_task_completed_event_id,
+             attributes.workflow_task_completed_event_id
+           ),
+         :ok <- match_marker(event.event_id, current_command(cursor.command), attributes) do
+      next =
+        cursor
+        |> record_marker_result(attributes)
+        |> advance_command()
+
+      phase = if current_command(next.command), do: :command_event, else: waiting_phase(next)
+      {:ok, next, phase}
     end
   end
 
@@ -530,6 +607,378 @@ defmodule Temporal.Workflow.TaskKernel.EventReducer do
 
   defp transition(
          %{
+           event_type: :EVENT_TYPE_SIGNAL_EXTERNAL_WORKFLOW_EXECUTION_INITIATED,
+           attributes:
+             {:signal_external_workflow_execution_initiated_event_attributes,
+              %SignalExternalWorkflowExecutionInitiatedEventAttributes{} = attributes}
+         } = event,
+         cursor,
+         :command_event,
+         _workflow
+       ) do
+    with :ok <-
+           correlate(
+             event.event_id,
+             :workflow_task_completed_event_id,
+             cursor.workflow_task_completed_event_id,
+             attributes.workflow_task_completed_event_id
+           ),
+         :ok <-
+           match_external_signal_command(
+             event.event_id,
+             current_command(cursor.command),
+             attributes
+           ) do
+      next =
+        cursor
+        |> Map.put(:external_signal_initiated_event_id, event.event_id)
+        |> Map.put(
+          :external_signal_states,
+          Map.put(
+            cursor.external_signal_states,
+            map_size(cursor.external_signal_states) + 1,
+            :initiated
+          )
+        )
+        |> advance_command()
+
+      phase =
+        if current_command(next.command), do: :command_event, else: :external_signal_resolution
+
+      {:ok, next, phase}
+    end
+  end
+
+  defp transition(
+         %{
+           event_type: :EVENT_TYPE_REQUEST_CANCEL_EXTERNAL_WORKFLOW_EXECUTION_INITIATED,
+           attributes:
+             {:request_cancel_external_workflow_execution_initiated_event_attributes,
+              %RequestCancelExternalWorkflowExecutionInitiatedEventAttributes{} = attributes}
+         } = event,
+         cursor,
+         :command_event,
+         _workflow
+       ) do
+    with :ok <-
+           correlate(
+             event.event_id,
+             :workflow_task_completed_event_id,
+             cursor.workflow_task_completed_event_id,
+             attributes.workflow_task_completed_event_id
+           ),
+         :ok <-
+           match_request_cancel_external(
+             event.event_id,
+             current_command(cursor.command),
+             attributes
+           ) do
+      next = advance_command(cursor)
+      phase = if current_command(next.command), do: :command_event, else: waiting_phase(next)
+      {:ok, next, phase}
+    end
+  end
+
+  defp transition(
+         %{
+           event_type: :EVENT_TYPE_START_CHILD_WORKFLOW_EXECUTION_INITIATED,
+           attributes:
+             {:start_child_workflow_execution_initiated_event_attributes,
+              %StartChildWorkflowExecutionInitiatedEventAttributes{} = attributes}
+         } = event,
+         cursor,
+         :command_event,
+         _workflow
+       ) do
+    with :ok <-
+           correlate(
+             event.event_id,
+             :workflow_task_completed_event_id,
+             cursor.workflow_task_completed_event_id,
+             attributes.workflow_task_completed_event_id
+           ),
+         :ok <-
+           match_child_workflow_command(
+             event.event_id,
+             current_command(cursor.command),
+             attributes
+           ) do
+      next =
+        cursor
+        |> Map.put(:child_workflow_initiated_event_id, event.event_id)
+        |> Map.put(
+          :child_workflow_states,
+          Map.put(
+            cursor.child_workflow_states,
+            map_size(cursor.child_workflow_states) + 1,
+            :initiated
+          )
+        )
+        |> advance_command()
+
+      phase = if current_command(next.command), do: :command_event, else: :child_workflow_started
+      {:ok, next, phase}
+    end
+  end
+
+  defp transition(
+         %{
+           event_type: :EVENT_TYPE_NEXUS_OPERATION_SCHEDULED,
+           attributes:
+             {:nexus_operation_scheduled_event_attributes,
+              %NexusOperationScheduledEventAttributes{} = attributes}
+         } = event,
+         cursor,
+         :command_event,
+         _workflow
+       ) do
+    with :ok <-
+           correlate(
+             event.event_id,
+             :workflow_task_completed_event_id,
+             cursor.workflow_task_completed_event_id,
+             attributes.workflow_task_completed_event_id
+           ),
+         :ok <- match_nexus_operation(event.event_id, current_command(cursor.command), attributes) do
+      next =
+        cursor
+        |> Map.put(:nexus_operation_scheduled_event_id, event.event_id)
+        |> Map.put(
+          :nexus_operation_states,
+          Map.put(
+            cursor.nexus_operation_states,
+            map_size(cursor.nexus_operation_states) + 1,
+            :scheduled
+          )
+        )
+        |> advance_command()
+
+      phase =
+        if current_command(next.command), do: :command_event, else: :nexus_operation_resolution
+
+      {:ok, next, phase}
+    end
+  end
+
+  defp transition(
+         %{
+           event_type: :EVENT_TYPE_NEXUS_OPERATION_STARTED,
+           attributes:
+             {:nexus_operation_started_event_attributes,
+              %NexusOperationStartedEventAttributes{} = attributes}
+         } = event,
+         cursor,
+         phase,
+         _workflow
+       )
+       when phase in [:nexus_operation_resolution, :command_event] do
+    with :ok <-
+           correlate(
+             event.event_id,
+             :scheduled_event_id,
+             cursor.nexus_operation_scheduled_event_id,
+             attributes.scheduled_event_id
+           ) do
+      {:ok,
+       %{
+         cursor
+         | nexus_operation_started_event_id: event.event_id,
+           nexus_operation_states:
+             Map.put(
+               cursor.nexus_operation_states,
+               map_size(cursor.nexus_operation_states),
+               :started
+             )
+       }, :nexus_operation_resolution}
+    end
+  end
+
+  defp transition(
+         %{
+           event_type: :EVENT_TYPE_NEXUS_OPERATION_COMPLETED,
+           attributes:
+             {:nexus_operation_completed_event_attributes,
+              %NexusOperationCompletedEventAttributes{} = attributes}
+         } = event,
+         cursor,
+         phase,
+         workflow
+       )
+       when phase in [:nexus_operation_resolution, :command_event] do
+    with :ok <- correlate_nexus(event.event_id, attributes, cursor),
+         {:ok, result} <- Temporal.Payload.decode(attributes.result),
+         outcomes <-
+           Map.put(
+             cursor.nexus_operation_outcomes,
+             map_size(cursor.nexus_operation_outcomes) + 1,
+             {:ok, result}
+           ),
+         {:ok, command} <-
+           workflow_command(workflow, cursor.input, cursor.activity_outcomes, %{
+             workflow_type: cursor.workflow_type,
+             task_queue: cursor.workflow_task_queue,
+             timer_states: cursor.timer_states,
+             timer_outcomes: cursor.timer_outcomes,
+             activity_states: cursor.activity_states,
+             signal_events: cursor.signal_events,
+             marker_results: cursor.marker_results,
+             nexus_operation_outcomes: outcomes,
+             child_workflow_outcomes: cursor.child_workflow_outcomes,
+             external_signal_outcomes: cursor.external_signal_outcomes,
+             logical_time: event.event_time || cursor.logical_time
+           }) do
+      {:ok,
+       %{
+         cursor
+         | command: command,
+           nexus_operation_outcomes: outcomes,
+           logical_time: event.event_time || cursor.logical_time
+       }, :workflow_task_scheduled}
+    end
+  end
+
+  defp transition(
+         %{
+           event_type: :EVENT_TYPE_NEXUS_OPERATION_FAILED,
+           attributes:
+             {:nexus_operation_failed_event_attributes,
+              %NexusOperationFailedEventAttributes{} = attributes}
+         } = event,
+         cursor,
+         phase,
+         workflow
+       )
+       when phase in [:nexus_operation_resolution, :command_event] do
+    with :ok <- correlate_nexus(event.event_id, attributes, cursor),
+         error <-
+           Temporal.ActivityError.exception(
+             message: "Nexus operation failed",
+             cause: Temporal.Failure.from_proto(Map.get(attributes, :failure)),
+             scheduled_event_id: attributes.scheduled_event_id
+           ),
+         outcomes <-
+           Map.put(
+             cursor.nexus_operation_outcomes,
+             map_size(cursor.nexus_operation_outcomes) + 1,
+             {:error, error}
+           ),
+         {:ok, command} <-
+           workflow_command(workflow, cursor.input, cursor.activity_outcomes, %{
+             workflow_type: cursor.workflow_type,
+             task_queue: cursor.workflow_task_queue,
+             timer_states: cursor.timer_states,
+             timer_outcomes: cursor.timer_outcomes,
+             activity_states: cursor.activity_states,
+             signal_events: cursor.signal_events,
+             marker_results: cursor.marker_results,
+             nexus_operation_outcomes: outcomes,
+             child_workflow_outcomes: cursor.child_workflow_outcomes,
+             external_signal_outcomes: cursor.external_signal_outcomes,
+             logical_time: event.event_time || cursor.logical_time
+           }) do
+      {:ok,
+       %{
+         cursor
+         | command: command,
+           nexus_operation_outcomes: outcomes,
+           logical_time: event.event_time || cursor.logical_time
+       }, :workflow_task_scheduled}
+    end
+  end
+
+  defp transition(
+         %{
+           event_type: :EVENT_TYPE_NEXUS_OPERATION_TIMED_OUT,
+           attributes:
+             {:nexus_operation_timed_out_event_attributes,
+              %NexusOperationTimedOutEventAttributes{} = attributes}
+         } = event,
+         cursor,
+         phase,
+         workflow
+       )
+       when phase in [:nexus_operation_resolution, :command_event] do
+    with :ok <- correlate_nexus(event.event_id, attributes, cursor),
+         error <-
+           Temporal.TimeoutError.exception(
+             message: "Nexus operation timed out",
+             cause: Temporal.Failure.from_proto(Map.get(attributes, :failure))
+           ),
+         outcomes <-
+           Map.put(
+             cursor.nexus_operation_outcomes,
+             map_size(cursor.nexus_operation_outcomes) + 1,
+             {:error, error}
+           ),
+         {:ok, command} <-
+           workflow_command(workflow, cursor.input, cursor.activity_outcomes, %{
+             workflow_type: cursor.workflow_type,
+             task_queue: cursor.workflow_task_queue,
+             timer_states: cursor.timer_states,
+             timer_outcomes: cursor.timer_outcomes,
+             activity_states: cursor.activity_states,
+             signal_events: cursor.signal_events,
+             marker_results: cursor.marker_results,
+             nexus_operation_outcomes: outcomes,
+             child_workflow_outcomes: cursor.child_workflow_outcomes,
+             external_signal_outcomes: cursor.external_signal_outcomes,
+             logical_time: event.event_time || cursor.logical_time
+           }) do
+      {:ok,
+       %{
+         cursor
+         | command: command,
+           nexus_operation_outcomes: outcomes,
+           logical_time: event.event_time || cursor.logical_time
+       }, :workflow_task_scheduled}
+    end
+  end
+
+  defp transition(
+         %{
+           event_type: :EVENT_TYPE_NEXUS_OPERATION_CANCELED,
+           attributes:
+             {:nexus_operation_canceled_event_attributes,
+              %NexusOperationCanceledEventAttributes{} = attributes}
+         } = event,
+         cursor,
+         phase,
+         workflow
+       )
+       when phase in [:nexus_operation_resolution, :command_event] do
+    with :ok <- correlate_nexus(event.event_id, attributes, cursor),
+         outcomes <-
+           Map.put(
+             cursor.nexus_operation_outcomes,
+             map_size(cursor.nexus_operation_outcomes) + 1,
+             {:error, :nexus_operation_canceled}
+           ),
+         {:ok, command} <-
+           workflow_command(workflow, cursor.input, cursor.activity_outcomes, %{
+             workflow_type: cursor.workflow_type,
+             task_queue: cursor.workflow_task_queue,
+             timer_states: cursor.timer_states,
+             timer_outcomes: cursor.timer_outcomes,
+             activity_states: cursor.activity_states,
+             signal_events: cursor.signal_events,
+             marker_results: cursor.marker_results,
+             nexus_operation_outcomes: outcomes,
+             child_workflow_outcomes: cursor.child_workflow_outcomes,
+             external_signal_outcomes: cursor.external_signal_outcomes,
+             logical_time: event.event_time || cursor.logical_time
+           }) do
+      {:ok,
+       %{
+         cursor
+         | command: command,
+           nexus_operation_outcomes: outcomes,
+           logical_time: event.event_time || cursor.logical_time
+       }, :workflow_task_scheduled}
+    end
+  end
+
+  defp transition(
+         %{
            event_type: :EVENT_TYPE_ACTIVITY_TASK_STARTED,
            attributes:
              {:activity_task_started_event_attributes,
@@ -563,15 +1012,412 @@ defmodule Temporal.Workflow.TaskKernel.EventReducer do
            attributes:
              {:workflow_execution_cancel_requested_event_attributes,
               %WorkflowExecutionCancelRequestedEventAttributes{}}
-         },
+         } = event,
+         cursor,
+         phase,
+         workflow
+       )
+       when phase in [
+              :external_event,
+              :workflow_task_scheduled,
+              :workflow_task_started,
+              :workflow_task_closed,
+              :command_event,
+              :activity_started,
+              :activity_resolution,
+              :timer_resolution
+            ] do
+    next = %{
+      cursor
+      | workflow_cancel_requested: true,
+        logical_time: event.event_time || cursor.logical_time
+    }
+
+    with {:ok, command} <-
+           workflow_command(workflow, cursor.input, cursor.activity_outcomes, %{
+             workflow_type: cursor.workflow_type,
+             task_queue: cursor.workflow_task_queue,
+             timer_states: cursor.timer_states,
+             timer_outcomes: cursor.timer_outcomes,
+             activity_states: cursor.activity_states,
+             signal_events: cursor.signal_events,
+             marker_results: cursor.marker_results,
+             workflow_cancel_requested: true,
+             logical_time: next.logical_time
+           }) do
+      next_phase =
+        if current_command(command) do
+          :workflow_task_scheduled
+        else
+          waiting_phase(next)
+        end
+
+      {:ok, %{next | command: command}, next_phase}
+    end
+  end
+
+  defp transition(
+         %{event_type: :EVENT_TYPE_WORKFLOW_EXECUTION_CANCEL_REQUESTED} = event,
+         _cursor,
+         _phase,
+         _workflow
+       ),
+       do: missing_attributes(event, "WorkflowExecutionCancelRequested")
+
+  defp transition(
+         %{
+           event_type: :EVENT_TYPE_EXTERNAL_WORKFLOW_EXECUTION_SIGNALED,
+           attributes:
+             {:external_workflow_execution_signaled_event_attributes,
+              %ExternalWorkflowExecutionSignaledEventAttributes{} = attributes}
+         } = event,
+         cursor,
+         phase,
+         workflow
+       )
+       when phase in [:external_signal_resolution, :command_event] do
+    with :ok <-
+           correlate(
+             event.event_id,
+             :initiated_event_id,
+             cursor.external_signal_initiated_event_id,
+             attributes.initiated_event_id
+           ),
+         outcomes <-
+           Map.put(
+             cursor.external_signal_outcomes,
+             map_size(cursor.external_signal_outcomes) + 1,
+             :ok
+           ),
+         {:ok, command} <-
+           workflow_command(workflow, cursor.input, cursor.activity_outcomes, %{
+             workflow_type: cursor.workflow_type,
+             task_queue: cursor.workflow_task_queue,
+             timer_states: cursor.timer_states,
+             timer_outcomes: cursor.timer_outcomes,
+             activity_states: cursor.activity_states,
+             signal_events: cursor.signal_events,
+             marker_results: cursor.marker_results,
+             external_signal_outcomes: outcomes,
+             child_workflow_outcomes: cursor.child_workflow_outcomes,
+             logical_time: event.event_time || cursor.logical_time
+           }) do
+      {:ok,
+       %{
+         cursor
+         | command: command,
+           external_signal_outcomes: outcomes,
+           logical_time: event.event_time || cursor.logical_time
+       }, :workflow_task_scheduled}
+    end
+  end
+
+  defp transition(
+         %{
+           event_type: :EVENT_TYPE_SIGNAL_EXTERNAL_WORKFLOW_EXECUTION_FAILED,
+           attributes:
+             {:signal_external_workflow_execution_failed_event_attributes,
+              %SignalExternalWorkflowExecutionFailedEventAttributes{} = attributes}
+         } = event,
+         cursor,
+         phase,
+         workflow
+       )
+       when phase in [:external_signal_resolution, :command_event] do
+    with :ok <-
+           correlate(
+             event.event_id,
+             :initiated_event_id,
+             cursor.external_signal_initiated_event_id,
+             attributes.initiated_event_id
+           ),
+         outcomes <-
+           Map.put(
+             cursor.external_signal_outcomes,
+             map_size(cursor.external_signal_outcomes) + 1,
+             {:error, {:external_signal_failed, attributes.cause}}
+           ),
+         {:ok, command} <-
+           workflow_command(workflow, cursor.input, cursor.activity_outcomes, %{
+             workflow_type: cursor.workflow_type,
+             task_queue: cursor.workflow_task_queue,
+             timer_states: cursor.timer_states,
+             timer_outcomes: cursor.timer_outcomes,
+             activity_states: cursor.activity_states,
+             signal_events: cursor.signal_events,
+             marker_results: cursor.marker_results,
+             external_signal_outcomes: outcomes,
+             child_workflow_outcomes: cursor.child_workflow_outcomes,
+             logical_time: event.event_time || cursor.logical_time
+           }) do
+      {:ok,
+       %{
+         cursor
+         | command: command,
+           external_signal_outcomes: outcomes,
+           logical_time: event.event_time || cursor.logical_time
+       }, :workflow_task_scheduled}
+    end
+  end
+
+  defp transition(
+         %{
+           event_type: :EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_STARTED,
+           attributes:
+             {:child_workflow_execution_started_event_attributes,
+              %ChildWorkflowExecutionStartedEventAttributes{} = attributes}
+         } = event,
          cursor,
          phase,
          _workflow
        )
-       when phase in [:activity_started, :activity_resolution] do
-    command = request_cancel_activity_command(cursor.activity_scheduled_event_id)
+       when phase in [:child_workflow_started, :command_event] do
+    with :ok <-
+           correlate(
+             event.event_id,
+             :initiated_event_id,
+             cursor.child_workflow_initiated_event_id,
+             attributes.initiated_event_id
+           ) do
+      {:ok,
+       %{
+         cursor
+         | child_workflow_started_event_id: event.event_id,
+           child_workflow_states:
+             Map.put(
+               cursor.child_workflow_states,
+               map_size(cursor.child_workflow_states),
+               :started
+             )
+       }, :child_workflow_resolution}
+    end
+  end
 
-    {:ok, %{cursor | workflow_cancel_requested: true, command: command}, :workflow_task_scheduled}
+  defp transition(
+         %{
+           event_type: :EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_COMPLETED,
+           attributes:
+             {:child_workflow_execution_completed_event_attributes,
+              %ChildWorkflowExecutionCompletedEventAttributes{} = attributes}
+         } = event,
+         cursor,
+         phase,
+         workflow
+       )
+       when phase in [:child_workflow_resolution, :child_workflow_started, :command_event] do
+    with :ok <- correlate_child_resolution(event.event_id, attributes, cursor),
+         {:ok, result} <- Temporal.Payload.decode(attributes.result),
+         outcomes <-
+           Map.put(
+             cursor.child_workflow_outcomes,
+             map_size(cursor.child_workflow_outcomes) + 1,
+             {:ok, result}
+           ),
+         {:ok, command} <-
+           workflow_command(workflow, cursor.input, cursor.activity_outcomes, %{
+             workflow_type: cursor.workflow_type,
+             task_queue: cursor.workflow_task_queue,
+             timer_states: cursor.timer_states,
+             timer_outcomes: cursor.timer_outcomes,
+             activity_states: cursor.activity_states,
+             signal_events: cursor.signal_events,
+             marker_results: cursor.marker_results,
+             external_signal_outcomes: cursor.external_signal_outcomes,
+             child_workflow_outcomes: outcomes,
+             child_workflow_states: cursor.child_workflow_states,
+             logical_time: event.event_time || cursor.logical_time
+           }) do
+      {:ok,
+       %{
+         cursor
+         | command: command,
+           child_workflow_outcomes: outcomes,
+           logical_time: event.event_time || cursor.logical_time
+       }, :workflow_task_scheduled}
+    end
+  end
+
+  defp transition(
+         %{
+           event_type: :EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_FAILED,
+           attributes:
+             {:child_workflow_execution_failed_event_attributes,
+              %ChildWorkflowExecutionFailedEventAttributes{} = attributes}
+         } = event,
+         cursor,
+         phase,
+         workflow
+       )
+       when phase in [:child_workflow_resolution, :child_workflow_started, :command_event] do
+    with :ok <- correlate_child_resolution(event.event_id, attributes, cursor),
+         error <- child_workflow_error(attributes, cursor),
+         outcomes <-
+           Map.put(
+             cursor.child_workflow_outcomes,
+             map_size(cursor.child_workflow_outcomes) + 1,
+             {:error, error}
+           ),
+         {:ok, command} <-
+           workflow_command(workflow, cursor.input, cursor.activity_outcomes, %{
+             workflow_type: cursor.workflow_type,
+             task_queue: cursor.workflow_task_queue,
+             timer_states: cursor.timer_states,
+             timer_outcomes: cursor.timer_outcomes,
+             activity_states: cursor.activity_states,
+             signal_events: cursor.signal_events,
+             marker_results: cursor.marker_results,
+             external_signal_outcomes: cursor.external_signal_outcomes,
+             child_workflow_outcomes: outcomes,
+             child_workflow_states: cursor.child_workflow_states,
+             logical_time: event.event_time || cursor.logical_time
+           }) do
+      {:ok,
+       %{
+         cursor
+         | command: command,
+           child_workflow_outcomes: outcomes,
+           logical_time: event.event_time || cursor.logical_time
+       }, :workflow_task_scheduled}
+    end
+  end
+
+  defp transition(
+         %{
+           event_type: :EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_CANCELED,
+           attributes:
+             {:child_workflow_execution_canceled_event_attributes,
+              %ChildWorkflowExecutionCanceledEventAttributes{} = attributes}
+         } = event,
+         cursor,
+         phase,
+         workflow
+       )
+       when phase in [:child_workflow_resolution, :child_workflow_started, :command_event] do
+    with :ok <- correlate_child_resolution(event.event_id, attributes, cursor),
+         outcomes <-
+           Map.put(
+             cursor.child_workflow_outcomes,
+             map_size(cursor.child_workflow_outcomes) + 1,
+             {:error, :child_workflow_canceled}
+           ),
+         {:ok, command} <-
+           workflow_command(workflow, cursor.input, cursor.activity_outcomes, %{
+             workflow_type: cursor.workflow_type,
+             task_queue: cursor.workflow_task_queue,
+             timer_states: cursor.timer_states,
+             timer_outcomes: cursor.timer_outcomes,
+             activity_states: cursor.activity_states,
+             signal_events: cursor.signal_events,
+             marker_results: cursor.marker_results,
+             external_signal_outcomes: cursor.external_signal_outcomes,
+             child_workflow_outcomes: outcomes,
+             child_workflow_states: cursor.child_workflow_states,
+             logical_time: event.event_time || cursor.logical_time
+           }) do
+      {:ok,
+       %{
+         cursor
+         | command: command,
+           child_workflow_outcomes: outcomes,
+           logical_time: event.event_time || cursor.logical_time
+       }, :workflow_task_scheduled}
+    end
+  end
+
+  defp transition(
+         %{
+           event_type: :EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_TIMED_OUT,
+           attributes:
+             {:child_workflow_execution_timed_out_event_attributes,
+              %ChildWorkflowExecutionTimedOutEventAttributes{} = attributes}
+         } = event,
+         cursor,
+         phase,
+         workflow
+       )
+       when phase in [:child_workflow_resolution, :child_workflow_started, :command_event] do
+    with :ok <- correlate_child_resolution(event.event_id, attributes, cursor),
+         error <- child_workflow_timeout(attributes),
+         outcomes <-
+           Map.put(
+             cursor.child_workflow_outcomes,
+             map_size(cursor.child_workflow_outcomes) + 1,
+             {:error, error}
+           ),
+         {:ok, command} <-
+           workflow_command(workflow, cursor.input, cursor.activity_outcomes, %{
+             workflow_type: cursor.workflow_type,
+             task_queue: cursor.workflow_task_queue,
+             timer_states: cursor.timer_states,
+             timer_outcomes: cursor.timer_outcomes,
+             activity_states: cursor.activity_states,
+             signal_events: cursor.signal_events,
+             marker_results: cursor.marker_results,
+             external_signal_outcomes: cursor.external_signal_outcomes,
+             child_workflow_outcomes: outcomes,
+             child_workflow_states: cursor.child_workflow_states,
+             logical_time: event.event_time || cursor.logical_time
+           }) do
+      {:ok,
+       %{
+         cursor
+         | command: command,
+           child_workflow_outcomes: outcomes,
+           logical_time: event.event_time || cursor.logical_time
+       }, :workflow_task_scheduled}
+    end
+  end
+
+  defp transition(
+         %{
+           event_type: :EVENT_TYPE_UPSERT_WORKFLOW_SEARCH_ATTRIBUTES,
+           attributes:
+             {:upsert_workflow_search_attributes_event_attributes,
+              %UpsertWorkflowSearchAttributesEventAttributes{} = attributes}
+         } = event,
+         cursor,
+         :command_event,
+         _workflow
+       ) do
+    with :ok <-
+           correlate(
+             event.event_id,
+             :workflow_task_completed_event_id,
+             cursor.workflow_task_completed_event_id,
+             attributes.workflow_task_completed_event_id
+           ),
+         :ok <-
+           match_upsert_attributes(event.event_id, current_command(cursor.command), attributes) do
+      next = advance_command(cursor)
+      phase = if current_command(next.command), do: :command_event, else: waiting_phase(next)
+      {:ok, next, phase}
+    end
+  end
+
+  defp transition(
+         %{
+           event_type: :EVENT_TYPE_WORKFLOW_PROPERTIES_MODIFIED,
+           attributes:
+             {:workflow_properties_modified_event_attributes,
+              %WorkflowPropertiesModifiedEventAttributes{} = attributes}
+         } = event,
+         cursor,
+         :command_event,
+         _workflow
+       ) do
+    with :ok <-
+           correlate(
+             event.event_id,
+             :workflow_task_completed_event_id,
+             cursor.workflow_task_completed_event_id,
+             attributes.workflow_task_completed_event_id
+           ),
+         :ok <-
+           match_modify_properties(event.event_id, current_command(cursor.command), attributes) do
+      next = advance_command(cursor)
+      phase = if current_command(next.command), do: :command_event, else: waiting_phase(next)
+      {:ok, next, phase}
+    end
   end
 
   defp transition(
@@ -598,6 +1444,7 @@ defmodule Temporal.Workflow.TaskKernel.EventReducer do
              timer_outcomes: cursor.timer_outcomes,
              activity_states: cursor.activity_states,
              signal_events: cursor.signal_events,
+             marker_results: cursor.marker_results,
              logical_time: cursor.logical_time
            }) do
       {:ok,
@@ -636,6 +1483,7 @@ defmodule Temporal.Workflow.TaskKernel.EventReducer do
              timer_outcomes: cursor.timer_outcomes,
              activity_states: cursor.activity_states,
              signal_events: cursor.signal_events,
+             marker_results: cursor.marker_results,
              logical_time: cursor.logical_time
            }) do
       {:ok,
@@ -672,6 +1520,7 @@ defmodule Temporal.Workflow.TaskKernel.EventReducer do
              timer_outcomes: cursor.timer_outcomes,
              activity_states: cursor.activity_states,
              signal_events: cursor.signal_events,
+             marker_results: cursor.marker_results,
              logical_time: cursor.logical_time
            }) do
       {:ok,
@@ -737,6 +1586,7 @@ defmodule Temporal.Workflow.TaskKernel.EventReducer do
              timer_outcomes: cursor.timer_outcomes,
              activity_states: cursor.activity_states,
              signal_events: cursor.signal_events,
+             marker_results: cursor.marker_results,
              logical_time: cursor.logical_time
            }) do
       {:ok,
@@ -812,6 +1662,114 @@ defmodule Temporal.Workflow.TaskKernel.EventReducer do
 
   defp transition(
          %{
+           event_type: :EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ACCEPTED,
+           attributes:
+             {:workflow_execution_update_accepted_event_attributes,
+              %WorkflowExecutionUpdateAcceptedEventAttributes{} = attributes}
+         } = event,
+         cursor,
+         phase,
+         _workflow
+       )
+       when phase in [
+              :external_event,
+              :workflow_task_scheduled,
+              :workflow_task_started,
+              :workflow_task_closed,
+              :command_event,
+              :activity_started,
+              :activity_resolution,
+              :timer_resolution,
+              :external_signal_resolution,
+              :child_workflow_started,
+              :child_workflow_resolution
+            ] do
+    update_id = accepted_update_id(attributes)
+
+    {:ok,
+     %{
+       cursor
+       | update_states: Map.put(cursor.update_states, update_id, :accepted),
+         logical_time: event.event_time || cursor.logical_time
+     }, phase}
+  end
+
+  defp transition(
+         %{
+           event_type: :EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_COMPLETED,
+           attributes:
+             {:workflow_execution_update_completed_event_attributes,
+              %WorkflowExecutionUpdateCompletedEventAttributes{} = attributes}
+         } = event,
+         cursor,
+         phase,
+         _workflow
+       )
+       when phase in [
+              :external_event,
+              :workflow_task_scheduled,
+              :workflow_task_started,
+              :workflow_task_closed,
+              :command_event,
+              :activity_started,
+              :activity_resolution,
+              :timer_resolution,
+              :external_signal_resolution,
+              :child_workflow_started,
+              :child_workflow_resolution
+            ] do
+    update_id = completed_update_id(attributes)
+    outcome = decode_update_outcome(attributes.outcome)
+
+    {:ok,
+     %{
+       cursor
+       | update_states: Map.put(cursor.update_states, update_id, outcome),
+         logical_time: event.event_time || cursor.logical_time
+     }, phase}
+  end
+
+  defp transition(
+         %{
+           event_type: :EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_REJECTED,
+           attributes:
+             {:workflow_execution_update_rejected_event_attributes,
+              %WorkflowExecutionUpdateRejectedEventAttributes{} = attributes}
+         } = event,
+         cursor,
+         phase,
+         _workflow
+       )
+       when phase in [
+              :external_event,
+              :workflow_task_scheduled,
+              :workflow_task_started,
+              :workflow_task_closed,
+              :command_event,
+              :activity_started,
+              :activity_resolution,
+              :timer_resolution,
+              :external_signal_resolution,
+              :child_workflow_started,
+              :child_workflow_resolution
+            ] do
+    update_id = rejected_update_id(attributes)
+
+    {:ok,
+     %{
+       cursor
+       | update_states:
+           Map.put(
+             cursor.update_states,
+             update_id,
+             {:error, Temporal.Failure.from_proto(attributes.failure)}
+           ),
+         logical_time: event.event_time || cursor.logical_time
+     }, phase}
+  end
+
+  defp transition(
+         %{
            event_type: :EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW,
            attributes:
              {:workflow_execution_continued_as_new_event_attributes,
@@ -868,6 +1826,68 @@ defmodule Temporal.Workflow.TaskKernel.EventReducer do
          _workflow
        ),
        do: missing_attributes(event, "WorkflowExecutionCompleted")
+
+  defp transition(
+         %{
+           event_type: :EVENT_TYPE_WORKFLOW_EXECUTION_FAILED,
+           attributes:
+             {:workflow_execution_failed_event_attributes,
+              %WorkflowExecutionFailedEventAttributes{} = attributes}
+         } = event,
+         cursor,
+         :command_event,
+         _workflow
+       ) do
+    with :ok <-
+           correlate(
+             event.event_id,
+             :workflow_task_completed_event_id,
+             cursor.workflow_task_completed_event_id,
+             attributes.workflow_task_completed_event_id
+           ),
+         :ok <- match_workflow_failure(event.event_id, cursor.command, attributes) do
+      {:ok, %{cursor | status: :failed}, :failed}
+    end
+  end
+
+  defp transition(
+         %{event_type: :EVENT_TYPE_WORKFLOW_EXECUTION_FAILED} = event,
+         _cursor,
+         :command_event,
+         _workflow
+       ),
+       do: missing_attributes(event, "WorkflowExecutionFailed")
+
+  defp transition(
+         %{
+           event_type: :EVENT_TYPE_WORKFLOW_EXECUTION_CANCELED,
+           attributes:
+             {:workflow_execution_canceled_event_attributes,
+              %WorkflowExecutionCanceledEventAttributes{} = attributes}
+         } = event,
+         cursor,
+         :command_event,
+         _workflow
+       ) do
+    with :ok <-
+           correlate(
+             event.event_id,
+             :workflow_task_completed_event_id,
+             cursor.workflow_task_completed_event_id,
+             attributes.workflow_task_completed_event_id
+           ),
+         :ok <- match_workflow_cancel(event.event_id, cursor.command, attributes) do
+      {:ok, %{cursor | status: :canceled}, :canceled}
+    end
+  end
+
+  defp transition(
+         %{event_type: :EVENT_TYPE_WORKFLOW_EXECUTION_CANCELED} = event,
+         _cursor,
+         :command_event,
+         _workflow
+       ),
+       do: missing_attributes(event, "WorkflowExecutionCanceled")
 
   defp transition(event, _cursor, phase, _workflow) do
     case unsupported_feature(event.event_type) do
@@ -1135,13 +2155,431 @@ defmodule Temporal.Workflow.TaskKernel.EventReducer do
       }}}
   end
 
-  defp request_cancel_activity_command(scheduled_event_id) do
-    %Command{
-      command_type: :COMMAND_TYPE_REQUEST_CANCEL_ACTIVITY_TASK,
-      attributes:
-        {:request_cancel_activity_task_command_attributes,
-         %RequestCancelActivityTaskCommandAttributes{scheduled_event_id: scheduled_event_id}}
-    }
+  defp match_external_signal_command(
+         _event_id,
+         %Command{
+           command_type: :COMMAND_TYPE_SIGNAL_EXTERNAL_WORKFLOW_EXECUTION,
+           attributes:
+             {:signal_external_workflow_execution_command_attributes,
+              %{execution: execution, signal_name: signal_name, input: input}}
+         },
+         %{
+           workflow_execution: actual_execution,
+           signal_name: actual_signal_name,
+           input: actual_input
+         }
+       ) do
+    comparisons = [
+      workflow_execution:
+        {execution && execution.workflow_id, actual_execution && actual_execution.workflow_id},
+      signal_name: {signal_name, actual_signal_name}
+    ]
+
+    mismatch = Enum.find(comparisons, fn {_field, {left, right}} -> left != right end)
+
+    case mismatch do
+      nil ->
+        match_payloads(input, actual_input, fn expected_input, actual_input ->
+          external_signal_mismatch(:input, expected_input, actual_input)
+        end)
+
+      {field, {expected_value, actual_value}} ->
+        external_signal_mismatch(field, expected_value, actual_value)
+    end
+  end
+
+  defp match_external_signal_command(event_id, %Command{command_type: command_type}, _attributes) do
+    {:error,
+     {:nondeterminism,
+      %{
+        event_id: event_id,
+        command_type: command_type,
+        expected_event_type: :EVENT_TYPE_SIGNAL_EXTERNAL_WORKFLOW_EXECUTION_INITIATED,
+        message: "SignalExternalWorkflowExecutionInitiated does not match the emitted command"
+      }}}
+  end
+
+  defp match_nexus_operation(
+         _event_id,
+         %Command{
+           command_type: :COMMAND_TYPE_SCHEDULE_NEXUS_OPERATION,
+           attributes:
+             {:schedule_nexus_operation_command_attributes,
+              %{endpoint: endpoint, service: service, operation: operation}}
+         },
+         %{endpoint: endpoint, service: service, operation: operation}
+       ),
+       do: :ok
+
+  defp match_nexus_operation(event_id, %Command{command_type: command_type}, _attributes) do
+    {:error,
+     {:nondeterminism,
+      %{
+        event_id: event_id,
+        command_type: command_type,
+        expected_event_type: :EVENT_TYPE_NEXUS_OPERATION_SCHEDULED,
+        message: "NexusOperationScheduled does not match the emitted command"
+      }}}
+  end
+
+  defp correlate_nexus(event_id, attributes, cursor) do
+    correlate(
+      event_id,
+      :scheduled_event_id,
+      cursor.nexus_operation_scheduled_event_id,
+      Map.get(attributes, :scheduled_event_id)
+    )
+  end
+
+  defp match_request_cancel_external(
+         _event_id,
+         %Command{
+           command_type: :COMMAND_TYPE_REQUEST_CANCEL_EXTERNAL_WORKFLOW_EXECUTION,
+           attributes:
+             {:request_cancel_external_workflow_execution_command_attributes,
+              %{workflow_id: workflow_id}}
+         },
+         %{workflow_execution: %{workflow_id: workflow_id}}
+       ),
+       do: :ok
+
+  defp match_request_cancel_external(
+         event_id,
+         %Command{command_type: command_type},
+         _attributes
+       ) do
+    {:error,
+     {:nondeterminism,
+      %{
+        event_id: event_id,
+        command_type: command_type,
+        expected_event_type: :EVENT_TYPE_REQUEST_CANCEL_EXTERNAL_WORKFLOW_EXECUTION_INITIATED,
+        message:
+          "RequestCancelExternalWorkflowExecutionInitiated does not match the emitted command"
+      }}}
+  end
+
+  defp match_child_workflow_command(
+         _event_id,
+         %Command{
+           command_type: :COMMAND_TYPE_START_CHILD_WORKFLOW_EXECUTION,
+           attributes:
+             {:start_child_workflow_execution_command_attributes,
+              %{
+                workflow_id: workflow_id,
+                workflow_type: %{name: workflow_type},
+                task_queue: %{name: task_queue},
+                input: input
+              }}
+         },
+         %{
+           workflow_id: workflow_id,
+           workflow_type: %{name: workflow_type},
+           task_queue: %{name: task_queue},
+           input: actual_input
+         }
+       ) do
+    match_payloads(input, actual_input, fn expected_input, actual_input ->
+      child_workflow_mismatch(:input, expected_input, actual_input)
+    end)
+  end
+
+  defp match_child_workflow_command(event_id, %Command{command_type: command_type}, _attributes) do
+    {:error,
+     {:nondeterminism,
+      %{
+        event_id: event_id,
+        command_type: command_type,
+        expected_event_type: :EVENT_TYPE_START_CHILD_WORKFLOW_EXECUTION_INITIATED,
+        message: "StartChildWorkflowExecutionInitiated does not match the emitted command"
+      }}}
+  end
+
+  defp correlate_child_resolution(
+         event_id,
+         attributes,
+         %{child_workflow_initiated_event_id: initiated_event_id}
+       ) do
+    correlate(
+      event_id,
+      :initiated_event_id,
+      initiated_event_id,
+      attributes.initiated_event_id
+    )
+  end
+
+  defp match_upsert_attributes(
+         _event_id,
+         %Command{
+           command_type: :COMMAND_TYPE_UPSERT_WORKFLOW_SEARCH_ATTRIBUTES,
+           attributes:
+             {:upsert_workflow_search_attributes_command_attributes,
+              %{search_attributes: expected}}
+         },
+         %{search_attributes: actual}
+       ) do
+    if equivalent_search_attributes?(expected, actual) do
+      :ok
+    else
+      {:error,
+       {:nondeterminism,
+        %{
+          command_type: :COMMAND_TYPE_UPSERT_WORKFLOW_SEARCH_ATTRIBUTES,
+          field: :search_attributes,
+          expected: actual,
+          actual: expected,
+          message: "UpsertWorkflowSearchAttributes does not match the emitted command"
+        }}}
+    end
+  end
+
+  defp match_upsert_attributes(event_id, %Command{command_type: command_type}, _attributes) do
+    {:error,
+     {:nondeterminism,
+      %{
+        event_id: event_id,
+        command_type: command_type,
+        expected_event_type: :EVENT_TYPE_UPSERT_WORKFLOW_SEARCH_ATTRIBUTES,
+        message: "UpsertWorkflowSearchAttributes does not match the emitted command"
+      }}}
+  end
+
+  defp match_modify_properties(
+         _event_id,
+         %Command{
+           command_type: :COMMAND_TYPE_MODIFY_WORKFLOW_PROPERTIES,
+           attributes:
+             {:modify_workflow_properties_command_attributes, %{upserted_memo: expected}}
+         },
+         %{upserted_memo: actual}
+       ) do
+    if equivalent_memo?(expected, actual) do
+      :ok
+    else
+      {:error,
+       {:nondeterminism,
+        %{
+          command_type: :COMMAND_TYPE_MODIFY_WORKFLOW_PROPERTIES,
+          field: :upserted_memo,
+          expected: actual,
+          actual: expected,
+          message: "WorkflowPropertiesModified does not match the emitted command"
+        }}}
+    end
+  end
+
+  defp match_modify_properties(event_id, %Command{command_type: command_type}, _attributes) do
+    {:error,
+     {:nondeterminism,
+      %{
+        event_id: event_id,
+        command_type: command_type,
+        expected_event_type: :EVENT_TYPE_WORKFLOW_PROPERTIES_MODIFIED,
+        message: "WorkflowPropertiesModified does not match the emitted command"
+      }}}
+  end
+
+  defp record_marker_result(cursor, %{marker_name: marker_name, details: details}) do
+    case marker_result(marker_name, details) do
+      nil ->
+        cursor
+
+      result ->
+        %{cursor | marker_results: Map.put(cursor.marker_results, marker_name, result)}
+    end
+  end
+
+  defp marker_result("SideEffect", %{"data" => payloads}) do
+    decode_marker_payload(payloads)
+  end
+
+  defp marker_result("LocalActivity", %{"data" => payloads}) do
+    {:local_activity, decode_marker_payload(payloads)}
+  end
+
+  defp marker_result("MutableSideEffect", %{"id" => id, "data" => payloads}) do
+    case decode_marker_payload(id) do
+      {:ok, decoded_id} -> {decoded_id, decode_marker_payload(payloads)}
+      _other -> nil
+    end
+  end
+
+  defp marker_result("Version", details) do
+    case decode_marker_payload(Map.get(details, "changeId")) do
+      {:ok, change_id} ->
+        {change_id, decode_marker_payload(Map.get(details, change_id))}
+
+      _other ->
+        nil
+    end
+  end
+
+  defp marker_result(_marker_name, _details), do: nil
+
+  defp decode_marker_payload(nil), do: nil
+
+  defp decode_marker_payload(payloads) do
+    case Temporal.Payload.decode(payloads) do
+      {:ok, value} -> {:ok, value}
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp match_marker(
+         _event_id,
+         %Command{
+           command_type: :COMMAND_TYPE_RECORD_MARKER,
+           attributes:
+             {:record_marker_command_attributes, %{marker_name: marker_name, details: details}}
+         },
+         %{marker_name: marker_name, details: actual_details}
+       ) do
+    if equivalent_marker_details?(details, actual_details) do
+      :ok
+    else
+      {:error,
+       {:nondeterminism,
+        %{
+          command_type: :COMMAND_TYPE_RECORD_MARKER,
+          field: :details,
+          message: "RecordMarker details do not match recorded history"
+        }}}
+    end
+  end
+
+  defp match_marker(event_id, %Command{command_type: command_type}, _attributes) do
+    {:error,
+     {:nondeterminism,
+      %{
+        event_id: event_id,
+        command_type: command_type,
+        expected_event_type: :EVENT_TYPE_MARKER_RECORDED,
+        message: "MarkerRecorded does not match the emitted command"
+      }}}
+  end
+
+  defp equivalent_marker_details?(left, right) do
+    decode_marker_values(left) == decode_marker_values(right)
+  end
+
+  defp decode_marker_values(map) when is_map(map) do
+    Map.new(map, fn {key, payloads} -> {key, decode_payloads(payloads)} end)
+  end
+
+  defp decode_marker_values(_other), do: nil
+
+  defp decode_payloads(payloads) do
+    case Temporal.Payload.decode(payloads) do
+      {:ok, value} -> value
+      {:error, _reason} -> payloads
+    end
+  end
+
+  defp equivalent_search_attributes?(nil, nil), do: true
+
+  defp equivalent_search_attributes?(%{indexed_fields: left}, %{indexed_fields: right}) do
+    Map.new(left, fn {k, v} -> {k, payload_value(v)} end) ==
+      Map.new(right, fn {k, v} -> {k, payload_value(v)} end)
+  end
+
+  defp equivalent_search_attributes?(_left, _right), do: false
+
+  defp equivalent_memo?(nil, nil), do: true
+
+  defp equivalent_memo?(%{fields: left}, %{fields: right}) do
+    Map.new(left, fn {k, v} -> {k, payload_value(v)} end) ==
+      Map.new(right, fn {k, v} -> {k, payload_value(v)} end)
+  end
+
+  defp equivalent_memo?(_left, _right), do: false
+
+  defp payload_value(payload) do
+    case Temporal.Payload.decode(%Temporal.Api.Common.V1.Payloads{payloads: [payload]}) do
+      {:ok, value} -> value
+      {:error, _reason} -> payload
+    end
+  end
+
+  defp child_workflow_error(attributes, cursor) do
+    cause = Temporal.Failure.from_proto(Map.get(attributes, :failure))
+
+    Temporal.ActivityError.exception(
+      message: "Child workflow failed",
+      cause: cause,
+      scheduled_event_id: attributes.initiated_event_id,
+      started_event_id: attributes.started_event_id,
+      retry_state: Map.get(attributes, :retry_state),
+      activity_id: nil,
+      activity_type: child_workflow_type(cursor)
+    )
+  end
+
+  defp child_workflow_timeout(attributes) do
+    Temporal.TimeoutError.exception(
+      message: "Child workflow timed out",
+      retry_state: Map.get(attributes, :retry_state)
+    )
+  end
+
+  defp child_workflow_type(%{child_workflow_states: states}) when map_size(states) > 0 do
+    nil
+  end
+
+  defp child_workflow_type(_cursor), do: nil
+
+  defp accepted_update_id(%{accepted_request: %{meta: %{update_id: update_id}}})
+       when is_binary(update_id) and update_id != "",
+       do: update_id
+
+  defp accepted_update_id(%{protocol_instance_id: protocol_instance_id}),
+    do: protocol_instance_id
+
+  defp completed_update_id(%{meta: %{update_id: update_id}}) when is_binary(update_id),
+    do: update_id
+
+  defp completed_update_id(_attributes), do: "update-#{System.unique_integer([:positive])}"
+
+  defp rejected_update_id(%{rejected_request: %{meta: %{update_id: update_id}}})
+       when is_binary(update_id) and update_id != "",
+       do: update_id
+
+  defp rejected_update_id(%{protocol_instance_id: protocol_instance_id}),
+    do: protocol_instance_id
+
+  defp decode_update_outcome(nil), do: nil
+
+  defp decode_update_outcome(%{value: {:success, payloads}}) do
+    case Temporal.Payload.decode(payloads) do
+      {:ok, value} -> {:ok, value}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp decode_update_outcome(%{value: {:failure, failure}}),
+    do: {:error, Temporal.Failure.from_proto(failure)}
+
+  defp external_signal_mismatch(field, expected, actual) do
+    {:error,
+     {:nondeterminism,
+      %{
+        command_type: :COMMAND_TYPE_SIGNAL_EXTERNAL_WORKFLOW_EXECUTION,
+        field: field,
+        expected: actual,
+        actual: expected,
+        message: "SignalExternalWorkflowExecution #{field} does not match recorded history"
+      }}}
+  end
+
+  defp child_workflow_mismatch(field, expected, actual) do
+    {:error,
+     {:nondeterminism,
+      %{
+        command_type: :COMMAND_TYPE_START_CHILD_WORKFLOW_EXECUTION,
+        field: field,
+        expected: actual,
+        actual: expected,
+        message: "StartChildWorkflowExecution #{field} does not match recorded history"
+      }}}
   end
 
   defp activity_mismatch(event_id, field, expected, actual) do
@@ -1305,6 +2743,94 @@ defmodule Temporal.Workflow.TaskKernel.EventReducer do
       }}}
   end
 
+  defp match_workflow_failure(
+         _event_id,
+         %Command{
+           command_type: :COMMAND_TYPE_FAIL_WORKFLOW_EXECUTION,
+           attributes: {:fail_workflow_execution_command_attributes, %{failure: expected}}
+         },
+         %{failure: actual}
+       ) do
+    if equivalent_failure?(expected, actual) do
+      :ok
+    else
+      {:error,
+       {:nondeterminism,
+        %{
+          command_type: :COMMAND_TYPE_FAIL_WORKFLOW_EXECUTION,
+          field: :failure,
+          expected: actual,
+          actual: expected,
+          message: "FailWorkflowExecution failure does not match recorded history"
+        }}}
+    end
+  end
+
+  defp match_workflow_failure(event_id, %Command{command_type: command_type}, _attributes) do
+    {:error,
+     {:nondeterminism,
+      %{
+        event_id: event_id,
+        command_type: command_type,
+        expected_event_type: :EVENT_TYPE_WORKFLOW_EXECUTION_FAILED,
+        message: "WorkflowExecutionFailed does not match the emitted command"
+      }}}
+  end
+
+  defp match_workflow_cancel(
+         _event_id,
+         %Command{
+           command_type: :COMMAND_TYPE_CANCEL_WORKFLOW_EXECUTION,
+           attributes: {:cancel_workflow_execution_command_attributes, %{details: expected}}
+         },
+         %{details: actual}
+       ) do
+    if equivalent_details?(expected, actual) do
+      :ok
+    else
+      {:error,
+       {:nondeterminism,
+        %{
+          command_type: :COMMAND_TYPE_CANCEL_WORKFLOW_EXECUTION,
+          field: :details,
+          expected: actual,
+          actual: expected,
+          message: "CancelWorkflowExecution details do not match recorded history"
+        }}}
+    end
+  end
+
+  defp match_workflow_cancel(event_id, %Command{command_type: command_type}, _attributes) do
+    {:error,
+     {:nondeterminism,
+      %{
+        event_id: event_id,
+        command_type: command_type,
+        expected_event_type: :EVENT_TYPE_WORKFLOW_EXECUTION_CANCELED,
+        message: "WorkflowExecutionCanceled does not match the emitted command"
+      }}}
+  end
+
+  defp equivalent_failure?(nil, nil), do: true
+
+  defp equivalent_failure?(%{message: left, failure_info: left_info}, %{
+         message: right,
+         failure_info: right_info
+       }) do
+    left == right and left_info == right_info
+  end
+
+  defp equivalent_failure?(_left, _right), do: false
+
+  defp equivalent_details?(left, right) do
+    with {:ok, left_value} <- Temporal.Payload.decode(left),
+         {:ok, right_value} <- Temporal.Payload.decode(right) do
+      left_value == right_value
+    else
+      _error -> false
+    end
+  end
+
   defp completion_command(result) do
     %Command{
       command_type: :COMMAND_TYPE_COMPLETE_WORKFLOW_EXECUTION,
@@ -1312,6 +2838,40 @@ defmodule Temporal.Workflow.TaskKernel.EventReducer do
         {:complete_workflow_execution_command_attributes,
          %CompleteWorkflowExecutionCommandAttributes{result: Temporal.Payload.encode(result)}}
     }
+  end
+
+  defp side_effect_results(defaults) do
+    case Map.get(defaults, :marker_results, %{}) do
+      %{"SideEffect" => {:ok, value}} -> %{1 => value}
+      _other -> %{}
+    end
+  end
+
+  defp mutable_side_effect_results(defaults) do
+    defaults
+    |> Map.get(:marker_results, %{})
+    |> Enum.reduce(%{}, fn
+      {"MutableSideEffect", {id, {:ok, value}}}, acc -> Map.put(acc, {id, 1}, value)
+      _entry, acc -> acc
+    end)
+  end
+
+  defp version_markers(defaults) do
+    defaults
+    |> Map.get(:marker_results, %{})
+    |> Enum.reduce(%{}, fn
+      {"Version", {change_id, {:ok, version}}}, acc -> Map.put(acc, change_id, version)
+      _entry, acc -> acc
+    end)
+  end
+
+  defp local_activity_results(defaults) do
+    defaults
+    |> Map.get(:marker_results, %{})
+    |> Enum.reduce(%{}, fn
+      {"LocalActivity", {:local_activity, {:ok, value}}}, acc -> Map.put(acc, 1, value)
+      _entry, acc -> acc
+    end)
   end
 
   defp workflow_command(workflow, argument, activity_outcomes, defaults) do
@@ -1339,7 +2899,15 @@ defmodule Temporal.Workflow.TaskKernel.EventReducer do
           operation_index: 0,
           operations: timer_operations,
           pending_commands: [],
-          signal_dispatcher: signal_dispatcher
+          query_handlers: Map.get(defaults, :query_handlers, %{}),
+          signal_dispatcher: signal_dispatcher,
+          workflow_cancel_requested: Map.get(defaults, :workflow_cancel_requested, false),
+          attempt: Map.get(defaults, :attempt, 1),
+          side_effect_results: side_effect_results(defaults),
+          mutable_side_effect_results: mutable_side_effect_results(defaults),
+          version_markers: version_markers(defaults),
+          local_activity_results: local_activity_results(defaults),
+          nexus_operation_outcomes: Map.get(defaults, :nexus_operation_outcomes, %{})
         })
       )
 
@@ -1373,8 +2941,22 @@ defmodule Temporal.Workflow.TaskKernel.EventReducer do
         {:temporal_signal_failed, reason} ->
           {:error, reason}
       after
+        capture_query_context()
         Temporal.Workflow.clear_context()
       end
+    end
+  end
+
+  defp capture_query_context do
+    case Temporal.Workflow.context() do
+      %{query_handlers: query_handlers} = context when map_size(query_handlers) > 0 ->
+        Temporal.Workflow.capture_query_context(context)
+
+      %{update_dispatcher: update_dispatcher} = context when not is_nil(update_dispatcher) ->
+        Temporal.Workflow.capture_query_context(context)
+
+      _context ->
+        :ok
     end
   end
 
@@ -1563,6 +3145,96 @@ defmodule Temporal.Workflow.TaskKernel.EventReducer do
     end
   end
 
+  defp ensure_command_machine(
+         registry,
+         %{
+           command:
+             %Command{
+               command_type: :COMMAND_TYPE_START_CHILD_WORKFLOW_EXECUTION
+             } = command
+         }
+       ) do
+    case MachineRegistry.fetch(registry, :child_workflow, "execution") do
+      {:ok, _machine} ->
+        {:ok, registry}
+
+      :error ->
+        MachineRegistry.register(
+          registry,
+          :child_workflow,
+          "execution",
+          ChildWorkflow.new("execution", command, 1)
+        )
+    end
+  end
+
+  defp ensure_command_machine(
+         registry,
+         %{
+           command:
+             %Command{
+               command_type: :COMMAND_TYPE_SIGNAL_EXTERNAL_WORKFLOW_EXECUTION
+             } = command
+         }
+       ) do
+    case MachineRegistry.fetch(registry, :external_signal, "execution") do
+      {:ok, _machine} ->
+        {:ok, registry}
+
+      :error ->
+        MachineRegistry.register(
+          registry,
+          :external_signal,
+          "execution",
+          ExternalSignal.new("execution", command, 1)
+        )
+    end
+  end
+
+  defp ensure_command_machine(
+         registry,
+         %{
+           command:
+             %Command{
+               command_type: :COMMAND_TYPE_REQUEST_CANCEL_EXTERNAL_WORKFLOW_EXECUTION
+             } = command
+         }
+       ) do
+    case MachineRegistry.fetch(registry, :workflow, "cancel-external") do
+      {:ok, _machine} ->
+        {:ok, registry}
+
+      :error ->
+        MachineRegistry.register(registry, :workflow, "cancel-external", %{
+          command_type: command.command_type,
+          command: command,
+          state: :command_created
+        })
+    end
+  end
+
+  defp ensure_command_machine(
+         registry,
+         %{
+           command:
+             %Command{
+               command_type: :COMMAND_TYPE_SCHEDULE_NEXUS_OPERATION
+             } = command
+         }
+       ) do
+    case MachineRegistry.fetch(registry, :workflow, "nexus-operation") do
+      {:ok, _machine} ->
+        {:ok, registry}
+
+      :error ->
+        MachineRegistry.register(registry, :workflow, "nexus-operation", %{
+          command_type: command.command_type,
+          command: command,
+          state: :command_created
+        })
+    end
+  end
+
   defp ensure_command_machine(registry, %{command: %Command{} = command}) do
     case command_machine_identity(command) do
       nil ->
@@ -1687,6 +3359,55 @@ defmodule Temporal.Workflow.TaskKernel.EventReducer do
        ),
        do: dispatch_if_present(registry, :continue_as_new, "execution", event, mode)
 
+  defp dispatch_machine_event(
+         registry,
+         %{event_type: :EVENT_TYPE_SIGNAL_EXTERNAL_WORKFLOW_EXECUTION_INITIATED} = event,
+         mode
+       ),
+       do: dispatch_if_present(registry, :external_signal, "execution", event, mode)
+
+  defp dispatch_machine_event(registry, %{event_type: event_type} = event, mode)
+       when event_type in [
+              :EVENT_TYPE_EXTERNAL_WORKFLOW_EXECUTION_SIGNALED,
+              :EVENT_TYPE_SIGNAL_EXTERNAL_WORKFLOW_EXECUTION_FAILED
+            ],
+       do: dispatch_if_present(registry, :external_signal, "execution", event, mode)
+
+  defp dispatch_machine_event(
+         registry,
+         %{event_type: :EVENT_TYPE_REQUEST_CANCEL_EXTERNAL_WORKFLOW_EXECUTION_INITIATED} = event,
+         mode
+       ),
+       do: dispatch_if_present(registry, :workflow, "cancel-external", event, mode)
+
+  defp dispatch_machine_event(registry, %{event_type: event_type} = event, mode)
+       when event_type in [
+              :EVENT_TYPE_NEXUS_OPERATION_SCHEDULED,
+              :EVENT_TYPE_NEXUS_OPERATION_STARTED,
+              :EVENT_TYPE_NEXUS_OPERATION_COMPLETED,
+              :EVENT_TYPE_NEXUS_OPERATION_FAILED,
+              :EVENT_TYPE_NEXUS_OPERATION_CANCELED,
+              :EVENT_TYPE_NEXUS_OPERATION_TIMED_OUT
+            ],
+       do: dispatch_if_present(registry, :workflow, "nexus-operation", event, mode)
+
+  defp dispatch_machine_event(
+         registry,
+         %{event_type: :EVENT_TYPE_START_CHILD_WORKFLOW_EXECUTION_INITIATED} = event,
+         mode
+       ),
+       do: dispatch_if_present(registry, :child_workflow, "execution", event, mode)
+
+  defp dispatch_machine_event(registry, %{event_type: event_type} = event, mode)
+       when event_type in [
+              :EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_STARTED,
+              :EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_COMPLETED,
+              :EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_FAILED,
+              :EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_CANCELED,
+              :EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_TIMED_OUT
+            ],
+       do: dispatch_if_present(registry, :child_workflow, "execution", event, mode)
+
   defp dispatch_machine_event(registry, %{event_type: event_type} = event, mode)
        when event_type in [
               :EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED,
@@ -1726,8 +3447,22 @@ defmodule Temporal.Workflow.TaskKernel.EventReducer do
   defp finish(cursor, :workflow_task_closed, :live),
     do: {:ok, %{cursor | status: :awaiting_live_completion}}
 
+  defp finish(cursor, phase, :live)
+       when phase in [
+              :external_event,
+              :timer_resolution,
+              :activity_resolution,
+              :external_signal_resolution,
+              :child_workflow_resolution,
+              :child_workflow_started,
+              :nexus_operation_resolution
+            ],
+       do: {:ok, %{cursor | status: :awaiting_live_completion}}
+
   defp finish(cursor, :completed, _mode), do: {:ok, cursor}
   defp finish(cursor, :continued_as_new, _mode), do: {:ok, cursor}
+  defp finish(cursor, :failed, _mode), do: {:ok, cursor}
+  defp finish(cursor, :canceled, _mode), do: {:ok, cursor}
 
   defp finish(cursor, phase, _mode) do
     {:error,
@@ -1759,6 +3494,19 @@ defmodule Temporal.Workflow.TaskKernel.EventReducer do
   defp expected_event_type(:activity_resolution), do: :EVENT_TYPE_ACTIVITY_TASK_COMPLETED
   defp expected_event_type(:timer_resolution), do: :EVENT_TYPE_TIMER_FIRED
   defp expected_event_type(:external_event), do: :EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED
+
+  defp expected_event_type(:external_signal_resolution),
+    do: :EVENT_TYPE_EXTERNAL_WORKFLOW_EXECUTION_SIGNALED
+
+  defp expected_event_type(:child_workflow_started),
+    do: :EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_STARTED
+
+  defp expected_event_type(:child_workflow_resolution),
+    do: :EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_COMPLETED
+
+  defp expected_event_type(:nexus_operation_resolution),
+    do: :EVENT_TYPE_NEXUS_OPERATION_COMPLETED
+
   defp expected_event_type(:completed), do: :EVENT_TYPE_UNSPECIFIED
   defp expected_event_type(:continued_as_new), do: :EVENT_TYPE_UNSPECIFIED
 
@@ -1776,14 +3524,31 @@ defmodule Temporal.Workflow.TaskKernel.EventReducer do
       end) ->
         :timer_resolution
 
+      Enum.any?(cursor.external_signal_states, fn {_index, status} ->
+        status == :initiated
+      end) ->
+        :external_signal_resolution
+
+      Enum.any?(cursor.child_workflow_states, fn {_index, status} ->
+        status in [:initiated, :started]
+      end) ->
+        if Map.has_key?(cursor.child_workflow_states, map_size(cursor.child_workflow_states)) do
+          :child_workflow_resolution
+        else
+          :child_workflow_started
+        end
+
+      Enum.any?(cursor.nexus_operation_states, fn {_index, status} ->
+        status in [:scheduled, :started]
+      end) ->
+        :nexus_operation_resolution
+
       true ->
         :external_event
     end
   end
 
-  defp unsupported_feature(:EVENT_TYPE_WORKFLOW_EXECUTION_FAILED), do: :workflow_failure
   defp unsupported_feature(:EVENT_TYPE_WORKFLOW_EXECUTION_TIMED_OUT), do: :workflow_timeout
-  defp unsupported_feature(:EVENT_TYPE_WORKFLOW_EXECUTION_CANCELED), do: :workflow_cancellation
   defp unsupported_feature(:EVENT_TYPE_WORKFLOW_EXECUTION_TERMINATED), do: :workflow_termination
   defp unsupported_feature(event_type) when event_type in @supported_events, do: nil
 

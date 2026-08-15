@@ -50,7 +50,9 @@ defmodule Temporal.Workflow.Replay do
   defp decode_history(_),
     do: {:error, {:invalid_history, %{message: "expected History protobuf or protobuf JSON"}}}
 
-  defp require_terminal(%{status: status}) when status in [:completed, :continued_as_new], do: :ok
+  defp require_terminal(%{status: status})
+       when status in [:completed, :continued_as_new, :failed, :canceled],
+       do: :ok
 
   defp require_terminal(cursor) do
     {:error,

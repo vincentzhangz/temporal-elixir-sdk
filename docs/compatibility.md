@@ -15,18 +15,18 @@ Elixir/OTP combinations. Pure-BEAM runtime operation is mandatory.
 
 ## Transport dependencies
 
-The gRPC client (`grpc` 1.0.3) is vendored in `third_party/grpc` so the SDK can
-carry an HTTP/2 PING keepalive patch on the Mint adapter without depending on an
-unreleased upstream. `grpc_core` remains a normal Hex dependency. The vendored
-code is tracked as a distinct directory so upstream changes can be diffed and
-re-applied.
+The gRPC client is implemented natively in the SDK (`Temporal.RPC.MintTransport`)
+on top of the `mint` HTTP/2 client and `castore` for TLS roots — there is no
+`grpc`/`grpc_core` dependency and no vendored gRPC library. Unary calls only
+are supported (the full surface the SDK uses), with HTTP/2 PING keepalive
+ported from the previously vendored adapter.
 
 Connection configuration covers verified TLS with custom CA roots and SNI
 override, PEM-bytes mTLS client credentials, opt-in `verify: :verify_none`,
 HTTP/2 PING keepalive (`interval`/`timeout`), a connect timeout, a 128 MiB
 default message-size limit, per-call metadata, and refreshable API-key
 providers. HTTP CONNECT proxies and DNS load balancing are not supported by the
-Mint/grpc stack.
+Mint stack.
 
 ## Temporal API and Server
 
@@ -43,10 +43,13 @@ incompatible public API changes may occur in minor releases and must be
 documented. After 1.0, removals require prior deprecation in a minor release.
 
 Stored histories are replayable only for the documented synchronous Workflow,
-Activity, timer, Continue-As-New, and signal subsets. Signal handlers are
-reconstructed from ordered history; buffered signals are not transferred to a
-Continue-As-New run by Temporal and must be carried explicitly in application
-input when required. The repository retains an official-server-generated
-fixture for the initial completion slice. Before any workflow runtime release,
-CI must retain histories from every SDK release and verify replay before
-broader compatibility can be claimed.
+Activity, timer, Continue-As-New, signal, child-workflow, external-signal,
+update, marker, and cancellation subsets. Signal handlers are reconstructed
+from ordered history; buffered signals are not transferred to a Continue-As-New
+run by Temporal and must be carried explicitly in application input when
+required. The client surface covers start/result/run chains, cancellation,
+termination, describe, list, signals, queries, updates, atomic Signal-With-Start,
+atomic multi-operation, and Schedule create/describe/delete/list. The repository
+retains an official-server-generated fixture for the initial completion slice.
+Before any workflow runtime release, CI must retain histories from every SDK
+release and verify replay before broader compatibility can be claimed.

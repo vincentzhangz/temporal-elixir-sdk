@@ -6,7 +6,7 @@ defmodule Temporal.Workflow.TaskKernel.State do
   history never implicitly schedules Workflow code.
   """
 
-  alias Temporal.Workflow.Machines.{SignalInbox, Timer}
+  alias Temporal.Workflow.Machines.{ChildWorkflow, ExternalSignal, SignalInbox, Timer}
   alias Temporal.Workflow.TaskKernel.{CommandBuffer, MachineRegistry}
 
   @enforce_keys [:namespace, :workflow_id, :run_id]
@@ -24,6 +24,8 @@ defmodule Temporal.Workflow.TaskKernel.State do
     last_event_id: 0,
     command_buffer: %CommandBuffer{next_sequence: 1, entries: []},
     machines: nil,
+    query_results: %{},
+    update_messages: [],
     history_jobs: :queue.new(),
     workflow_jobs: :queue.new()
   ]
@@ -103,6 +105,9 @@ defmodule Temporal.Workflow.TaskKernel.State do
   @spec commands(t()) :: [struct()]
   def commands(%__MODULE__{command_buffer: buffer}), do: CommandBuffer.commands(buffer)
 
+  @spec query_results(t()) :: map()
+  def query_results(%__MODULE__{query_results: query_results}), do: query_results
+
   defp new_machine_registry do
     MachineRegistry.new()
     |> register_type!(:workflow, &dispatch_command_machine/3)
@@ -112,6 +117,8 @@ defmodule Temporal.Workflow.TaskKernel.State do
     |> register_type!(:continue_as_new, &dispatch_command_machine/3)
     |> register_type!(:timer, &Timer.apply_event/3)
     |> register_type!(:signal, &dispatch_signal/3)
+    |> register_type!(:external_signal, &ExternalSignal.apply_event/3)
+    |> register_type!(:child_workflow, &ChildWorkflow.apply_event/3)
   end
 
   defp register_type!(registry, type, dispatcher) do

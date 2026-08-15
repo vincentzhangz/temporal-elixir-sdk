@@ -3,12 +3,6 @@ defmodule Temporal.Activity.Runtime do
 
   alias Temporal.Activity.{Context, Info}
 
-  alias Temporal.Api.Failure.V1.{
-    ApplicationFailureInfo,
-    CanceledFailureInfo,
-    Failure
-  }
-
   alias Temporal.Api.Workflowservice.V1.{
     PollActivityTaskQueueResponse,
     RespondActivityTaskCanceledRequest,
@@ -40,7 +34,8 @@ defmodule Temporal.Activity.Runtime do
     with :ok <- validate_task(task),
          :ok <- fence(previous_fence, task),
          {:ok, activity} <- fetch_activity(activities, task.activity_type),
-         {:ok, argument} <- Temporal.Payload.decode(task.input) do
+         {:ok, argument} <-
+           Temporal.Payload.decode(task.input, Keyword.get(options, :payload_codecs, [])) do
       task_fence = task_fence(task)
       namespace = Keyword.get(options, :namespace, task.workflow_namespace)
 
@@ -57,7 +52,7 @@ defmodule Temporal.Activity.Runtime do
           {:ok,
            %RespondActivityTaskCompletedRequest{
              task_token: task.task_token,
-             result: Temporal.Payload.encode(result),
+             result: Temporal.Payload.encode(result, Keyword.get(options, :payload_codecs, [])),
              identity: identity,
              namespace: namespace
            }, task_fence}
@@ -72,7 +67,7 @@ defmodule Temporal.Activity.Runtime do
            }, task_fence}
 
         {:error, exception, stacktrace} ->
-          failure = exception_to_failure(exception, stacktrace)
+          failure = Temporal.Failure.to_proto(exception, stacktrace)
 
           {:error_response,
            %RespondActivityTaskFailedRequest{
@@ -186,54 +181,6 @@ defmodule Temporal.Activity.Runtime do
       heartbeat_details: task.heartbeat_details
     }
   end
-
-  defp exception_to_failure(%Temporal.ApplicationError{} = exception, stacktrace) do
-    %Failure{
-      message: exception.message,
-      source: "ElixirSDK",
-      stack_trace: Exception.format(:error, exception, stacktrace),
-      cause: cause_to_failure(exception.cause),
-      failure_info:
-        {:application_failure_info,
-         %ApplicationFailureInfo{
-           type: exception.type || "Temporal.ApplicationError",
-           non_retryable: exception.non_retryable,
-           details: Temporal.Payload.encode(exception.details),
-           next_retry_delay: optional_duration(exception.next_retry_delay)
-         }}
-    }
-  end
-
-  defp exception_to_failure(%Temporal.CanceledError{} = exception, stacktrace) do
-    %Failure{
-      message: exception.message,
-      source: "ElixirSDK",
-      stack_trace: Exception.format(:error, exception, stacktrace),
-      cause: cause_to_failure(exception.cause),
-      failure_info:
-        {:canceled_failure_info,
-         %CanceledFailureInfo{details: Temporal.Payload.encode(exception.details)}}
-    }
-  end
-
-  defp exception_to_failure(exception, stacktrace) do
-    %Failure{
-      message: Exception.message(exception),
-      source: "ElixirSDK",
-      stack_trace: Exception.format(:error, exception, stacktrace),
-      failure_info:
-        {:application_failure_info,
-         %ApplicationFailureInfo{type: inspect(exception.__struct__), non_retryable: false}}
-    }
-  end
-
-  defp cause_to_failure(nil), do: nil
-  defp cause_to_failure(exception), do: exception_to_failure(exception, [])
-
-  defp optional_duration(nil), do: nil
-
-  defp optional_duration(seconds) when is_integer(seconds) and seconds > 0,
-    do: %Google.Protobuf.Duration{seconds: seconds}
 
   defp heartbeat_throttle_ms(nil), do: 60_000
 

@@ -21,7 +21,6 @@ in `GENERATED_V1.63.3_SHA256SUMS`.
 - `protoc`: 35.1
 - `protoc-gen-elixir`: 0.17.0
 - runtime `protobuf`: 0.17.0
-- runtime `grpc`: 1.0.3
 
 Install the exact generator and regenerate:
 
@@ -32,9 +31,10 @@ PATH="$HOME/.mix/escripts:$PATH" scripts/generate_protos.sh
 
 The script generates Temporal and Nexus annotation modules. Imported Google API
 annotations are resolved from the official Temporal archive but are not
-generated because the locked `grpc` dependency's `googleapis` package supplies
-those Elixir modules. Standard Google protobuf types are supplied by the pinned
-`protobuf` runtime and `protoc` installation.
+generated: the SDK has no `grpc`/`grpc_core` dependency, so only message
+modules are produced (`--elixir_out` without the `plugins=grpc` flag) and the
+standard Google protobuf types are supplied by the pinned `protobuf` runtime
+and `protoc` installation.
 
 Any API upgrade requires review of the official tag diff, refreshed input and
 output checksums, strict compilation, tests, and compatibility documentation.

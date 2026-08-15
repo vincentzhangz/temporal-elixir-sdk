@@ -10,7 +10,7 @@ defmodule Temporal.Connection do
   use GenServer
 
   alias Temporal.Connection.Options
-  alias Temporal.RPC.{Error, GRPCTransport, RetryPolicy}
+  alias Temporal.RPC.{Error, MintTransport, RetryPolicy}
 
   @type option ::
           {:transport, module()}
@@ -61,7 +61,7 @@ defmodule Temporal.Connection do
 
   @impl true
   def init(options) do
-    transport = Keyword.get(options, :transport, GRPCTransport)
+    transport = Keyword.get(options, :transport, MintTransport)
 
     with {:ok, config} <- Options.new(options),
          {:ok, transport_state} <- init_transport(transport, config, options) do

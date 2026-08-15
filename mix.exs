@@ -32,9 +32,10 @@ defmodule Temporal.MixProject do
   defp deps do
     [
       {:protobuf, "== 0.17.0"},
-      {:grpc, path: "third_party/grpc"},
       {:mint, "== 1.9.3"},
       {:castore, "== 1.0.21"},
+      {:jason, "== 1.4.5"},
+      {:telemetry, "~> 1.0"},
       {:credo, "== 1.7.19", only: [:dev, :test], runtime: false},
       {:dialyxir, "== 1.4.7", only: [:dev], runtime: false},
       {:ex_doc, "== 0.40.3", only: :dev, runtime: false}
@@ -60,13 +61,24 @@ defmodule Temporal.MixProject do
   defp docs do
     [
       main: "readme",
-      extras: ["README.md", "CHANGELOG.md", "docs/compatibility.md"],
+      extras: ["README.md", "CHANGELOG.md", "docs/compatibility.md", "docs/features.md"],
       skip_undefined_reference_warnings_on: [
         "Temporal.Api.Command.V1.Command",
         "Temporal.Api.Command.V1.Command.t/0",
+        "Temporal.Api.Common.V1.Payloads",
+        "Temporal.Api.Common.V1.Payloads.t/0",
         "Temporal.Api.History.V1.History",
+        "Temporal.Api.History.V1.History.t/0",
         "Temporal.Api.History.V1.HistoryEvent",
         "Temporal.Api.History.V1.HistoryEvent.t/0",
+        "Temporal.Api.Workflowservice.V1.CreateScheduleResponse",
+        "Temporal.Api.Workflowservice.V1.CreateScheduleResponse.t/0",
+        "Temporal.Api.Workflowservice.V1.DeleteScheduleResponse",
+        "Temporal.Api.Workflowservice.V1.DeleteScheduleResponse.t/0",
+        "Temporal.Api.Workflowservice.V1.DescribeScheduleResponse",
+        "Temporal.Api.Workflowservice.V1.DescribeScheduleResponse.t/0",
+        "Temporal.Api.Workflowservice.V1.PollActivityTaskQueueResponse",
+        "Temporal.Api.Workflowservice.V1.PollActivityTaskQueueResponse.t/0",
         "Temporal.RPC"
       ],
       before_closing_body_tag: &docs_disclaimer/1

@@ -13,21 +13,29 @@ defmodule Temporal.RPC.Error do
   @spec from(term()) :: t()
   def from(%__MODULE__{} = error), do: error
 
-  def from(%GRPC.RPCError{} = error) do
-    %__MODULE__{
-      status: status_atom(error.status),
-      message: error.message,
-      details: Map.get(error, :details)
-    }
+  if Code.ensure_loaded?(GRPC.RPCError) do
+    def from(%GRPC.RPCError{} = error) do
+      %__MODULE__{
+        status: status_atom(error.status),
+        message: error.message,
+        details: Map.get(error, :details)
+      }
+    end
   end
 
   def from(:timeout), do: %__MODULE__{status: :deadline_exceeded, message: "deadline exceeded"}
   def from(:cancelled), do: %__MODULE__{status: :cancelled, message: "caller cancelled"}
   def from(reason), do: %__MODULE__{status: :unknown, message: inspect(reason), details: reason}
 
-  defp status_atom(status) when is_atom(status), do: status
+  @spec from(atom() | integer(), String.t() | nil) :: t()
+  def from(status, message) do
+    %__MODULE__{status: status_atom(status), message: message}
+  end
 
-  defp status_atom(status) when is_integer(status) do
+  @spec status_atom(atom() | integer()) :: atom()
+  def status_atom(status) when is_atom(status), do: status
+
+  def status_atom(status) when is_integer(status) do
     %{
       0 => :ok,
       1 => :cancelled,

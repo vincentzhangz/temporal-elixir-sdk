@@ -2,8 +2,12 @@ defmodule Temporal.Activity.Worker do
   @moduledoc """
   Bounded long-poll executor for registered zero- or one-argument Activities.
 
-  Activity tasks are executed serially by this process. Async completion,
-  eager execution, local Activities, and worker versioning are not implemented.
+  Activity tasks are executed concurrently: each polled task runs in its own
+  spawned process, so independent Activities proceed in parallel while each
+  retains its own heartbeat/cancellation context. Task tokens are registered
+  with the worker, enabling asynchronous completion via
+  `Temporal.Activity.Async.complete_async/3` / `fail_async/3`. Eager
+  execution, local Activities, and worker versioning are not implemented.
   """
 
   use GenServer
@@ -16,7 +20,9 @@ defmodule Temporal.Activity.Worker do
     PollActivityTaskQueueResponse,
     RecordActivityTaskHeartbeatResponse,
     RespondActivityTaskCanceledResponse,
+    RespondActivityTaskCompletedRequest,
     RespondActivityTaskCompletedResponse,
+    RespondActivityTaskFailedRequest,
     RespondActivityTaskFailedResponse
   }
 
@@ -32,6 +38,12 @@ defmodule Temporal.Activity.Worker do
   @spec stop(GenServer.server()) :: :ok
   def stop(worker), do: GenServer.stop(worker, :normal)
 
+  @doc "Dispatches an eager Activity task (from a Workflow Task completion) without polling."
+  @spec submit_eager(GenServer.server(), PollActivityTaskQueueResponse.t()) :: :ok
+  def submit_eager(worker, %PollActivityTaskQueueResponse{} = task) do
+    GenServer.cast(worker, {:eager_activity_task, task})
+  end
+
   @impl true
   def init(options) do
     connection = Keyword.fetch!(options, :connection)
@@ -45,7 +57,9 @@ defmodule Temporal.Activity.Worker do
       activities: Keyword.fetch!(options, :activities),
       poll_timeout: Keyword.get(options, :poll_timeout, 30_000),
       fence_ttl: Keyword.get(options, :fence_ttl, 60_000),
-      fences: %{}
+      payload_codecs: config.payload_codecs,
+      fences: %{},
+      tokens: %{}
     }
 
     send(self(), :poll)
@@ -82,72 +96,172 @@ defmodule Temporal.Activity.Worker do
     {:noreply, %{state | fences: fences}}
   end
 
+  @impl true
+  def handle_info({:activity_task_result, task_token, {:ok, request}}, state) do
+    case Map.pop(state.tokens, task_token) do
+      {nil, _tokens} ->
+        {:noreply, state}
+
+      {_task, tokens} ->
+        state =
+          case rpc(state, @complete_method, request, RespondActivityTaskCompletedResponse) do
+            {:ok, _response} -> state
+            {:error, _reason} -> state
+          end
+
+        {:noreply, %{state | tokens: tokens}}
+    end
+  end
+
+  def handle_info({:activity_task_result, task_token, {:error_response, request}}, state) do
+    case Map.pop(state.tokens, task_token) do
+      {nil, _tokens} ->
+        {:noreply, state}
+
+      {_task, tokens} ->
+        state =
+          case rpc(state, @fail_method, request, RespondActivityTaskFailedResponse) do
+            {:ok, _response} -> state
+            {:error, _reason} -> state
+          end
+
+        {:noreply, %{state | tokens: tokens}}
+    end
+  end
+
+  def handle_info({:activity_task_result, task_token, {:canceled, request}}, state) do
+    case Map.pop(state.tokens, task_token) do
+      {nil, _tokens} ->
+        {:noreply, state}
+
+      {_task, tokens} ->
+        state =
+          case rpc(state, @cancel_method, request, RespondActivityTaskCanceledResponse) do
+            {:ok, _response} -> state
+            {:error, _reason} -> state
+          end
+
+        {:noreply, %{state | tokens: tokens}}
+    end
+  end
+
+  def handle_info({:activity_task_result, task_token, :dropped}, state) do
+    {:noreply, %{state | tokens: Map.delete(state.tokens, task_token)}}
+  end
+
+  @impl true
+  def handle_cast({:activity_async_complete, task_token, payload}, state) do
+    case Map.get(state.tokens, task_token) do
+      nil ->
+        {:noreply, state}
+
+      task ->
+        request = %RespondActivityTaskCompletedRequest{
+          task_token: task_token,
+          result: payload,
+          identity: state.identity,
+          namespace: state.namespace
+        }
+
+        handle_async_respond(task_token, task, request, :complete, state)
+    end
+  end
+
+  def handle_cast({:activity_async_fail, task_token, failure}, state) do
+    case Map.get(state.tokens, task_token) do
+      nil ->
+        {:noreply, state}
+
+      task ->
+        request = %RespondActivityTaskFailedRequest{
+          task_token: task_token,
+          failure: failure,
+          identity: state.identity,
+          namespace: state.namespace
+        }
+
+        handle_async_respond(task_token, task, request, :fail, state)
+    end
+  end
+
+  @impl true
+  def handle_cast({:eager_activity_task, %PollActivityTaskQueueResponse{} = task}, state) do
+    {:noreply, execute_task(task, state)}
+  end
+
   defp execute_task(task, state) do
     key = fence_key(task)
     fence = Map.get(state.fences, key)
+    tokens = Map.put(state.tokens, task.task_token, task)
+    Process.send_after(self(), {:evict_fence, key, task.task_token}, state.fence_ttl)
 
-    heartbeat = fn request ->
-      rpc(state, @heartbeat_method, request, RecordActivityTaskHeartbeatResponse)
-    end
+    worker = self()
+    connection = state.connection
+    namespace = state.namespace
+    identity = state.identity
+    activities = state.activities
+    task_queue = state.task_queue
+    poll_timeout = state.poll_timeout
+    payload_codecs = state.payload_codecs
 
-    case Runtime.prepare(task, state.activities, state.identity, fence,
-           namespace: state.namespace,
-           task_queue: state.task_queue,
-           heartbeat: heartbeat
-         ) do
-      {:ok, completion, next_fence} ->
-        respond(
-          task,
-          key,
-          state,
-          @complete_method,
-          completion,
-          RespondActivityTaskCompletedResponse,
-          next_fence
-        )
+    spawn(fn ->
+      heartbeat = &heartbeat_rpc(connection, poll_timeout, &1)
 
-      {:error_response, failure, next_fence} ->
-        respond(
-          task,
-          key,
-          state,
-          @fail_method,
-          failure,
-          RespondActivityTaskFailedResponse,
-          next_fence
-        )
+      result =
+        case Runtime.prepare(task, activities, identity, fence,
+               namespace: namespace,
+               task_queue: task_queue,
+               heartbeat: heartbeat,
+               payload_codecs: payload_codecs
+             ) do
+          {:ok, completion, _next_fence} ->
+            {:ok, completion}
 
-      {:canceled, cancellation, next_fence} ->
-        respond(
-          task,
-          key,
-          state,
-          @cancel_method,
-          cancellation,
-          RespondActivityTaskCanceledResponse,
-          next_fence
-        )
+          {:error_response, failure, _next_fence} ->
+            {:error_response, failure}
 
-      {:error, _reason} ->
-        %{state | fences: Map.delete(state.fences, key)}
+          {:canceled, cancellation, _next_fence} ->
+            {:canceled, cancellation}
+
+          {:error, _reason} ->
+            :dropped
+        end
+
+      send(worker, {:activity_task_result, task.task_token, result})
+    end)
+
+    %{state | tokens: tokens, fences: Map.put(state.fences, key, fence)}
+  end
+
+  defp heartbeat_rpc(connection, timeout, request) do
+    request_module = request.__struct__
+
+    with {:ok, bytes} <-
+           Temporal.Connection.unary(
+             connection,
+             @heartbeat_method,
+             request_module.encode(request),
+             timeout: timeout
+           ) do
+      {:ok, RecordActivityTaskHeartbeatResponse.decode(bytes)}
     end
   end
 
-  defp respond(task, key, state, method, request, response_module, fence) do
-    case rpc(state, method, request, response_module) do
+  defp handle_async_respond(task_token, _task, request, kind, state) do
+    case rpc(state, respond_method(kind), request, response_module(kind)) do
       {:ok, _response} ->
-        Process.send_after(
-          self(),
-          {:evict_fence, key, task.task_token},
-          state.fence_ttl
-        )
-
-        %{state | fences: Map.put(state.fences, key, fence)}
+        {:noreply, %{state | tokens: Map.delete(state.tokens, task_token)}}
 
       {:error, _reason} ->
-        %{state | fences: Map.delete(state.fences, key)}
+        {:noreply, %{state | tokens: Map.delete(state.tokens, task_token)}}
     end
   end
+
+  defp respond_method(:complete), do: @complete_method
+  defp respond_method(:fail), do: @fail_method
+
+  defp response_module(:complete), do: RespondActivityTaskCompletedResponse
+  defp response_module(:fail), do: RespondActivityTaskFailedResponse
 
   defp fence_key(task) do
     execution = task.workflow_execution

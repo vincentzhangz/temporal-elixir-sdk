@@ -2,24 +2,41 @@ defmodule Temporal.Client do
   @moduledoc """
   Client APIs for the supported synchronous Workflow vertical slice.
 
-  This API supports start/result, cancellation, Workflow signals, and atomic
-  Signal-With-Start. Signal request IDs are stable across transport retries;
-  callers should supply `:request_id` when retrying across separate API calls.
+  This API supports start/result, cancellation, termination, describe, listing,
+  Workflow signals, queries, and atomic Signal-With-Start. Signal request IDs
+  are stable across transport retries; callers should supply `:request_id` when
+  retrying across separate API calls.
   """
 
   alias Temporal.Api.Common.V1.{WorkflowExecution, WorkflowType}
   alias Temporal.Api.Taskqueue.V1.TaskQueue
 
   alias Temporal.Api.Workflowservice.V1.{
+    DescribeWorkflowExecutionRequest,
+    DescribeWorkflowExecutionResponse,
+    ExecuteMultiOperationRequest,
+    ExecuteMultiOperationResponse,
     GetWorkflowExecutionHistoryRequest,
     GetWorkflowExecutionHistoryResponse,
+    ListWorkflowExecutionsRequest,
+    ListWorkflowExecutionsResponse,
+    QueryWorkflowRequest,
+    QueryWorkflowResponse,
     RequestCancelWorkflowExecutionRequest,
     RequestCancelWorkflowExecutionResponse,
     SignalWithStartWorkflowExecutionResponse,
     SignalWorkflowExecutionResponse,
     StartWorkflowExecutionRequest,
-    StartWorkflowExecutionResponse
+    StartWorkflowExecutionResponse,
+    TerminateWorkflowExecutionRequest,
+    TerminateWorkflowExecutionResponse,
+    UpdateWorkflowExecutionRequest,
+    UpdateWorkflowExecutionResponse
   }
+
+  alias Temporal.Api.Query.V1.WorkflowQuery
+
+  alias Temporal.Api.Update.V1.{Input, Meta, Request, WaitPolicy}
 
   alias Temporal.Workflow.Signal.Requests
 
@@ -41,6 +58,12 @@ defmodule Temporal.Client do
   @cancel_method "/temporal.api.workflowservice.v1.WorkflowService/RequestCancelWorkflowExecution"
   @signal_method "/temporal.api.workflowservice.v1.WorkflowService/SignalWorkflowExecution"
   @signal_with_start_method "/temporal.api.workflowservice.v1.WorkflowService/SignalWithStartWorkflowExecution"
+  @query_method "/temporal.api.workflowservice.v1.WorkflowService/QueryWorkflow"
+  @terminate_method "/temporal.api.workflowservice.v1.WorkflowService/TerminateWorkflowExecution"
+  @describe_method "/temporal.api.workflowservice.v1.WorkflowService/DescribeWorkflowExecution"
+  @list_method "/temporal.api.workflowservice.v1.WorkflowService/ListWorkflowExecutions"
+  @update_method "/temporal.api.workflowservice.v1.WorkflowService/UpdateWorkflowExecution"
+  @multi_operation_method "/temporal.api.workflowservice.v1.WorkflowService/ExecuteMultiOperation"
 
   @spec start_workflow(GenServer.server(), String.t(), term(), keyword()) ::
           {:ok, Handle.t()} | {:error, term()}
@@ -54,9 +77,23 @@ defmodule Temporal.Client do
       workflow_id: workflow_id,
       workflow_type: %WorkflowType{name: workflow_name},
       task_queue: %TaskQueue{name: task_queue},
-      input: Temporal.Payload.encode(argument),
+      input: Temporal.Payload.encode(argument, config.payload_codecs),
       identity: config.identity,
-      request_id: request_id()
+      request_id: request_id(),
+      workflow_id_reuse_policy:
+        Keyword.get(options, :workflow_id_reuse_policy, :WORKFLOW_ID_REUSE_POLICY_UNSPECIFIED),
+      workflow_id_conflict_policy:
+        Keyword.get(
+          options,
+          :workflow_id_conflict_policy,
+          :WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED
+        ),
+      retry_policy: Keyword.get(options, :retry_policy),
+      cron_schedule: Keyword.get(options, :cron_schedule, ""),
+      memo: Keyword.get(options, :memo),
+      search_attributes: Keyword.get(options, :search_attributes),
+      header: Keyword.get(options, :header),
+      request_eager_execution: Keyword.get(options, :request_eager_execution, false)
     }
 
     with {:ok, response} <-
@@ -155,6 +192,285 @@ defmodule Temporal.Client do
     )
   end
 
+  @doc """
+  Queries the exact Workflow Run identified by a handle.
+
+  The query executes against the workflow's deterministic state at the latest
+  history event. `:query_reject_condition` defaults to
+  `:QUERY_REJECT_CONDITION_NONE`.
+  """
+  @spec query_workflow(Handle.t(), String.t(), term(), keyword()) ::
+          {:ok, term()} | {:error, term()}
+  def query_workflow(%Handle{} = handle, query_type, query_args),
+    do: query_workflow(handle, query_type, query_args, [])
+
+  def query_workflow(%Handle{} = handle, query_type, query_args, options) do
+    query(
+      handle.connection,
+      handle.namespace,
+      handle.workflow_id,
+      handle.run_id,
+      query_type,
+      query_args,
+      options
+    )
+  end
+
+  @doc """
+  Queries a Workflow Execution by ID.
+
+  An empty `:run_id` (the default) targets the current run.
+  """
+  @spec query_workflow(
+          GenServer.server(),
+          String.t(),
+          String.t(),
+          term(),
+          keyword()
+        ) :: {:ok, term()} | {:error, term()}
+  def query_workflow(connection, workflow_id, query_type, query_args),
+    do: query_workflow(connection, workflow_id, query_type, query_args, [])
+
+  def query_workflow(connection, workflow_id, query_type, query_args, options) do
+    config = Temporal.Connection.configuration(connection)
+
+    query(
+      connection,
+      config.namespace,
+      workflow_id,
+      Keyword.get(options, :run_id, ""),
+      query_type,
+      query_args,
+      options
+    )
+  end
+
+  @doc """
+  Terminates a Workflow Execution by handle (with optional reason/details) or
+  by Workflow ID (with default options).
+  """
+  @spec terminate_workflow(Handle.t(), keyword()) :: :ok | {:error, term()}
+  @spec terminate_workflow(GenServer.server(), String.t()) :: :ok | {:error, term()}
+  def terminate_workflow(arg, options)
+
+  def terminate_workflow(%Handle{} = handle, options) do
+    config = Temporal.Connection.configuration(handle.connection)
+
+    request = %TerminateWorkflowExecutionRequest{
+      namespace: handle.namespace,
+      workflow_execution: %WorkflowExecution{
+        workflow_id: handle.workflow_id,
+        run_id: handle.run_id
+      },
+      reason: Keyword.get(options, :reason, "terminated by client"),
+      details: Temporal.Payload.encode(Keyword.get(options, :details)),
+      identity: config.identity,
+      first_execution_run_id: handle.run_id
+    }
+
+    case call(
+           handle.connection,
+           @terminate_method,
+           request,
+           TerminateWorkflowExecutionResponse,
+           options
+         ) do
+      {:ok, _response} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def terminate_workflow(connection, workflow_id),
+    do: terminate_workflow(connection, workflow_id, [])
+
+  @doc "Terminates a Workflow Execution by ID; an empty run_id targets the current run."
+  @spec terminate_workflow(GenServer.server(), String.t(), keyword()) :: :ok | {:error, term()}
+  def terminate_workflow(connection, workflow_id, options) do
+    config = Temporal.Connection.configuration(connection)
+
+    request = %TerminateWorkflowExecutionRequest{
+      namespace: config.namespace,
+      workflow_execution: %WorkflowExecution{
+        workflow_id: workflow_id,
+        run_id: Keyword.get(options, :run_id, "")
+      },
+      reason: Keyword.get(options, :reason, "terminated by client"),
+      details: Temporal.Payload.encode(Keyword.get(options, :details)),
+      identity: config.identity,
+      first_execution_run_id: Keyword.get(options, :first_execution_run_id, "")
+    }
+
+    case call(
+           connection,
+           @terminate_method,
+           request,
+           TerminateWorkflowExecutionResponse,
+           options
+         ) do
+      {:ok, _response} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @doc "Terminates a Workflow Execution by handle with default options."
+  @spec terminate_workflow(Handle.t()) :: :ok | {:error, term()}
+  def terminate_workflow(%Handle{} = handle), do: terminate_workflow(handle, [])
+
+  @doc "Describes a Workflow Execution and returns its current status and metadata."
+  @spec describe_workflow(Handle.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def describe_workflow(%Handle{} = handle, options \\ []) do
+    request = %DescribeWorkflowExecutionRequest{
+      namespace: handle.namespace,
+      execution: %WorkflowExecution{
+        workflow_id: handle.workflow_id,
+        run_id: handle.run_id
+      }
+    }
+
+    case call(
+           handle.connection,
+           @describe_method,
+           request,
+           DescribeWorkflowExecutionResponse,
+           options
+         ) do
+      {:ok, response} -> {:ok, response}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @doc "Lists Workflow Executions matching a query with an optional page size."
+  @spec list_workflows(GenServer.server(), String.t(), keyword()) ::
+          {:ok, %{executions: list(), next_page_token: String.t()}} | {:error, term()}
+  def list_workflows(connection, query, options \\ []) do
+    config = Temporal.Connection.configuration(connection)
+
+    request = %ListWorkflowExecutionsRequest{
+      namespace: config.namespace,
+      page_size: Keyword.get(options, :page_size, 0),
+      next_page_token: Keyword.get(options, :next_page_token, ""),
+      query: query
+    }
+
+    with {:ok, response} <-
+           call(connection, @list_method, request, ListWorkflowExecutionsResponse, options) do
+      {:ok,
+       %{
+         executions: response.executions,
+         next_page_token: response.next_page_token
+       }}
+    end
+  end
+
+  @doc """
+  Sends an Update to a Workflow Execution and returns the decoded result.
+
+  `options` accepts `:update_id` (default `"update-<unique>"`), `:wait_policy`
+  (default `:UPDATE_WORKFLOW_EXECUTION_LIFECYCLE_STAGE_COMPLETED`), and
+  `:request_id`. The update is handled by the handler registered with
+  `Temporal.Workflow.set_update_handler/2` on the worker.
+  """
+  @spec update_workflow(Handle.t(), String.t(), term()) :: {:ok, term()} | {:error, term()}
+  def update_workflow(%Handle{} = handle, update_name, args),
+    do: update_workflow(handle, update_name, args, [])
+
+  @spec update_workflow(Handle.t(), String.t(), term(), keyword()) ::
+          {:ok, term()} | {:error, term()}
+  def update_workflow(%Handle{} = handle, update_name, args, options) do
+    update_request = %Request{
+      meta: %Meta{update_id: Keyword.get(options, :update_id, request_id())},
+      input: %Input{name: update_name, args: Temporal.Payload.encode(args)},
+      request_id: Keyword.get(options, :request_id, request_id())
+    }
+
+    request = %UpdateWorkflowExecutionRequest{
+      namespace: handle.namespace,
+      workflow_execution: %WorkflowExecution{
+        workflow_id: handle.workflow_id,
+        run_id: handle.run_id
+      },
+      first_execution_run_id: handle.run_id,
+      wait_policy: %WaitPolicy{
+        lifecycle_stage:
+          Keyword.get(
+            options,
+            :wait_policy,
+            :UPDATE_WORKFLOW_EXECUTION_LIFECYCLE_STAGE_COMPLETED
+          )
+      },
+      request: update_request
+    }
+
+    with {:ok, response} <-
+           call(
+             handle.connection,
+             @update_method,
+             request,
+             UpdateWorkflowExecutionResponse,
+             options
+           ) do
+      decode_update_response(response, update_name)
+    end
+  end
+
+  @doc """
+  Sends an Update to a Workflow Execution by ID and returns the decoded result.
+
+  An empty `:run_id` (the default) targets the current run.
+  """
+  @spec update_workflow(GenServer.server(), String.t(), String.t(), term()) ::
+          {:ok, term()} | {:error, term()}
+  def update_workflow(connection, workflow_id, update_name, args),
+    do: update_workflow(connection, workflow_id, update_name, args, [])
+
+  @spec update_workflow(GenServer.server(), String.t(), String.t(), term(), keyword()) ::
+          {:ok, term()} | {:error, term()}
+  def update_workflow(connection, workflow_id, update_name, args, options) do
+    config = Temporal.Connection.configuration(connection)
+
+    update_request = %Request{
+      meta: %Meta{update_id: Keyword.get(options, :update_id, request_id())},
+      input: %Input{name: update_name, args: Temporal.Payload.encode(args)},
+      request_id: Keyword.get(options, :request_id, request_id())
+    }
+
+    request = %UpdateWorkflowExecutionRequest{
+      namespace: config.namespace,
+      workflow_execution: %WorkflowExecution{
+        workflow_id: workflow_id,
+        run_id: Keyword.get(options, :run_id, "")
+      },
+      wait_policy: %WaitPolicy{
+        lifecycle_stage:
+          Keyword.get(
+            options,
+            :wait_policy,
+            :UPDATE_WORKFLOW_EXECUTION_LIFECYCLE_STAGE_COMPLETED
+          )
+      },
+      request: update_request
+    }
+
+    with {:ok, response} <-
+           call(connection, @update_method, request, UpdateWorkflowExecutionResponse, options) do
+      decode_update_response(response, update_name)
+    end
+  end
+
+  defp decode_update_response(%{outcome: %{value: {:success, payloads}}}, _update_name) do
+    Temporal.Payload.decode(payloads)
+  end
+
+  defp decode_update_response(
+         %{outcome: %{value: {:failure, failure}}},
+         _update_name
+       ) do
+    {:error, {:update_failed, Temporal.Failure.from_proto(failure)}}
+  end
+
+  defp decode_update_response(response, update_name),
+    do: {:error, {:update_unresolved, update_name, response.stage}}
+
   @doc "Atomically starts a Workflow if needed and delivers its first signal."
   @spec signal_with_start(
           GenServer.server(),
@@ -206,6 +522,149 @@ defmodule Temporal.Client do
          run_id: response.run_id
        }}
     end
+  end
+
+  @doc """
+  Atomically executes a batch of operations on a Workflow in one RPC.
+
+  `operations` is a list of `{:start, start_options}` and/or
+  `{:signal, handle_or_id, signal_name, input}` tuples. Returns a
+  `%ExecuteMultiOperationResponse{}` when the batch succeeds; the server
+  rejects the whole batch if any operation fails.
+  """
+  @spec execute_multi_operation(
+          GenServer.server(),
+          String.t(),
+          term(),
+          keyword()
+        ) :: {:ok, term()} | {:error, term()}
+  def execute_multi_operation(connection, workflow_name, argument, options) do
+    config = Temporal.Connection.configuration(connection)
+
+    start_request = %StartWorkflowExecutionRequest{
+      namespace: config.namespace,
+      workflow_id: Keyword.fetch!(options, :id),
+      workflow_type: %WorkflowType{name: workflow_name},
+      task_queue: %TaskQueue{name: Keyword.fetch!(options, :task_queue)},
+      input: Temporal.Payload.encode(argument),
+      identity: config.identity,
+      request_id: request_id()
+    }
+
+    update_request =
+      case Keyword.fetch(options, :update) do
+        {:ok, {update_name, update_args}} ->
+          %UpdateWorkflowExecutionRequest{
+            namespace: config.namespace,
+            workflow_execution: %WorkflowExecution{workflow_id: Keyword.fetch!(options, :id)},
+            request: %Request{
+              meta: %Meta{update_id: Keyword.get(options, :update_id, request_id())},
+              input: %Input{name: update_name, args: Temporal.Payload.encode(update_args)},
+              request_id: request_id()
+            },
+            wait_policy: %WaitPolicy{
+              lifecycle_stage: :UPDATE_WORKFLOW_EXECUTION_LIFECYCLE_STAGE_COMPLETED
+            }
+          }
+
+        :error ->
+          nil
+      end
+
+    operations =
+      [%ExecuteMultiOperationRequest.Operation{operation: {:start_workflow, start_request}}] ++
+        if update_request do
+          [%ExecuteMultiOperationRequest.Operation{operation: {:update_workflow, update_request}}]
+        else
+          []
+        end
+
+    request = %ExecuteMultiOperationRequest{
+      namespace: config.namespace,
+      operations: operations
+    }
+
+    call(connection, @multi_operation_method, request, ExecuteMultiOperationResponse, options)
+  end
+
+  @doc """
+  Atomically starts a Workflow if needed and delivers its first Update.
+
+  This is the Update-With-Start semantic from the official SDKs, implemented as
+  a single `ExecuteMultiOperation` RPC containing a start + update pair. On
+  success returns `{:ok, result, %Handle{}}` where `result` is the decoded
+  update outcome.
+  """
+  @spec update_with_start(
+          GenServer.server(),
+          String.t(),
+          term(),
+          String.t(),
+          term(),
+          keyword()
+        ) :: {:ok, term(), Handle.t()} | {:error, term()}
+  def update_with_start(
+        connection,
+        workflow_name,
+        workflow_input,
+        update_name,
+        update_args,
+        options
+      ) do
+    config = Temporal.Connection.configuration(connection)
+    workflow_id = Keyword.fetch!(options, :id)
+
+    with {:ok, response} <-
+           execute_multi_operation(
+             connection,
+             workflow_name,
+             workflow_input,
+             Keyword.merge(options,
+               update: {update_name, update_args},
+               update_id: Keyword.get(options, :update_id, request_id())
+             )
+           ) do
+      case decode_multi_update(response) do
+        {:ok, result} ->
+          {:ok, result,
+           %Handle{
+             connection: connection,
+             namespace: config.namespace,
+             workflow_id: workflow_id,
+             run_id: first_run_id(response)
+           }}
+
+        {:error, _reason} = error ->
+          error
+      end
+    end
+  end
+
+  defp decode_multi_update(%ExecuteMultiOperationResponse{responses: responses}) do
+    Enum.find_value(responses, {:error, :update_result_missing}, fn
+      %{response: {:update_workflow, %{outcome: outcome}}} -> decode_update_outcome(outcome)
+      _other -> false
+    end)
+  end
+
+  defp decode_update_outcome(nil), do: {:error, :update_unresolved}
+
+  defp decode_update_outcome(%{value: {:success, payloads}}) do
+    case Temporal.Payload.decode(payloads) do
+      {:ok, value} -> {:ok, value}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp decode_update_outcome(%{value: {:failure, failure}}) do
+    {:error, {:update_failed, Temporal.Failure.from_proto(failure)}}
+  end
+
+  defp first_run_id(%ExecuteMultiOperationResponse{responses: responses}) do
+    Enum.find_value(responses, "", fn
+      %{response: {:start_workflow, %{run_id: run_id}}} -> run_id
+      _other -> false
+    end)
   end
 
   @spec result(Handle.t(), keyword()) :: {:ok, term()} | {:error, term()}
@@ -288,6 +747,53 @@ defmodule Temporal.Client do
       :ok
     end
   end
+
+  defp query(
+         connection,
+         namespace,
+         workflow_id,
+         run_id,
+         query_type,
+         query_args,
+         options
+       ) do
+    request = %QueryWorkflowRequest{
+      namespace: namespace,
+      execution: %WorkflowExecution{workflow_id: workflow_id, run_id: run_id},
+      query: %WorkflowQuery{
+        query_type: query_type,
+        query_args: Temporal.Payload.encode(query_args)
+      },
+      query_reject_condition:
+        Keyword.get(options, :query_reject_condition, :QUERY_REJECT_CONDITION_NONE)
+    }
+
+    with {:ok, response} <-
+           call(connection, @query_method, request, QueryWorkflowResponse, options) do
+      decode_query_response(response, query_type)
+    end
+  end
+
+  defp decode_query_response(
+         %{query_result: %Temporal.Api.Common.V1.Payloads{} = payloads},
+         _query_type
+       ) do
+    case Temporal.Payload.decode(payloads) do
+      {:ok, value} -> {:ok, value}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp decode_query_response(
+         %{query_rejected: %{status: status}},
+         _query_type
+       )
+       when not is_nil(status) and status != :QUERY_REJECT_CONDITION_UNSPECIFIED do
+    {:error, {:query_rejected, status}}
+  end
+
+  defp decode_query_response(_response, query_type),
+    do: {:error, {:query_failed, query_type}}
 
   defp decode_close_event(%{history: %{events: events}}) do
     Enum.find_value(events, {:error, :workflow_not_completed}, fn

@@ -11,6 +11,16 @@ defmodule Temporal.ConnectionOptionsTest do
     assert options.default_deadline == 10_000
   end
 
+  test "accepts and validates :payload_codecs" do
+    assert {:ok, options} =
+             Options.new(target: "localhost:7233", payload_codecs: [Temporal.Codec.Base64])
+
+    assert Options.payload_codecs(options) == [Temporal.Codec.Base64]
+
+    assert {:error, {:invalid_options, :payload_codecs}} =
+             Options.new(target: "localhost:7233", payload_codecs: [:not_a_codec_module, 42])
+  end
+
   test "defaults non-local targets to verified TLS using CAStore" do
     assert {:ok, options} = Options.new(target: "example.tmprl.cloud:7233")
     assert options.tls
